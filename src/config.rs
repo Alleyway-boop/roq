@@ -191,15 +191,16 @@ pub fn print_profiles(profiles: &HashMap<String, Profile>) {
 mod tests {
     use super::*;
 
-    fn write_temp(content: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("roq-test-{}.conf", std::process::id()));
+    fn write_temp(tag: &str, content: &str) -> PathBuf {
+        // 并行测试各自独立文件，避免同名互踩
+        let path = std::env::temp_dir().join(format!("roq-test-{}-{}.conf", tag, std::process::id()));
         fs::write(&path, content).unwrap();
         path
     }
 
     #[test]
     fn parse_profile_with_defaults_and_ssl() {
-        let path = write_temp("# 注释\n[a]\nhost=h1\nuser=u\npassword=p\ndatabase=d\nssl=true\n");
+        let path = write_temp("full", "# 注释\n[a]\nhost=h1\nuser=u\npassword=p\ndatabase=d\nssl=true\n");
         let profiles = load_profiles(&path).unwrap();
         let profile = &profiles["a"];
         assert_eq!(profile.host, "h1");
@@ -211,7 +212,7 @@ mod tests {
 
     #[test]
     fn missing_required_key_reports_section() {
-        let path = write_temp("[b]\nhost=h\n");
+        let path = write_temp("missing", "[b]\nhost=h\n");
         let err = load_profiles(&path).unwrap_err();
         assert!(err.contains("[b]"), "报错应指明节名：{}", err);
         let _ = fs::remove_file(&path);
