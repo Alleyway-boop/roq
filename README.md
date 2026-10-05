@@ -57,8 +57,11 @@ ssl=true          ; 可选，是否启用 TLS
 - **审计日志**：`~\.roq\logs\roq-YYYYMM.jsonl`（按月，集中跨项目）
   每行一条 JSON：`ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`
   `outcome` 含 `ok`、`gate-rejected`（含拒绝原因）、`connect-error`、`exec-error`、`config-error`——被拒的尝试同样留痕
-- **结果存档**：当前项目目录 `\.roq\results\YYYYMMDD\HHMMSS-毫秒-<profile>.tsv`（与终端所见一致，含截断）
-  在家目录等非项目位置运行时退回 `~\.roq\results\`；项目里 gitignore 加一行 `.roq/` 即可忽略
+- **结果存档**：当前项目目录 `\.roq\results\YYYYMMDD\HHMMSS-毫秒-<表名>-<profile>.tsv`
+  - 文件头为 `# ` 元信息块（时间 / 库 / 行数上限 / SQL），TSV 数据体从首个非 `#` 行开始
+  - **单元格不截断**（全量保真；`--max-cell` 只影响终端显示）
+  - 文件名自动带表名（取 FROM/JOIN 后首个表标识符），不打开文件也能认出查了哪张表
+  - 在家目录等非项目位置运行时退回 `~\.roq\results\`；项目里 gitignore 加一行 `.roq/` 即可忽略
 
 ## 编译
 
