@@ -432,8 +432,8 @@ fn gate(sql_raw: &str) -> Result<String, String> {
     Ok(sql)
 }
 
-/// 单元格渲染：NULL -> \N；控制字符替换为空格；超长截断。
-fn render_cell(value: Value, max_cell: usize) -> String {
+/// 单元格转义（不截断）：NULL -> \N；\t \n \r -> 可见转义序列，保真且保持 TSV 单行结构。
+fn escape_cell(value: Value) -> String {
     let raw = match value {
         Value::NULL => "\\N".to_string(),
         Value::Int(v) => v.to_string(),
@@ -443,22 +443,54 @@ fn render_cell(value: Value, max_cell: usize) -> String {
         Value::Bytes(bytes) => String::from_utf8_lossy(&bytes).to_string(),
         other => other.as_sql(true),
     };
-    // 控制字符转义为可见序列（保真，便于离档复查），保持 TSV 单行单元格。
-    let clean: String = raw
-        .chars()
+    raw.chars()
         .flat_map(|c| match c {
             '\t' => "\\t".chars().collect::<Vec<char>>(),
             '\r' => "\\r".chars().collect::<Vec<char>>(),
             '\n' => "\\n".chars().collect::<Vec<char>>(),
             _ => vec![c],
         })
-        .collect();
-    if clean.chars().count() <= max_cell {
-        clean
+        .collect()
+}
+
+/// 终端展示截断（存档保留全量，仅终端限流防刷屏）。
+fn truncate_cell(escaped: String, max_cell: usize) -> String {
+    if escaped.chars().count() <= max_cell {
+        escaped
     } else {
-        let cut: String = clean.chars().take(max_cell).collect();
+        let cut: String = escaped.chars().take(max_cell).collect();
         format!("{}…", cut)
     }
+}
+
+/// 从 SQL 提取首个表名做存档文件名 slug（FROM/JOIN/TABLE 等后的首个非关键词标识符）。
+fn table_slug(sql: &str) -> Option<String> {
+    let is_keyword = |word: &str| {
+        matches!(
+            word,
+            "SELECT" | "FROM" | "WHERE" | "JOIN" | "ON" | "GROUP" | "ORDER" | "BY" | "LIMIT"
+                | "UNION" | "ALL" | "AS" | "AND" | "OR" | "NOT" | "IN" | "EXISTS" | "SET"
+                | "VALUES" | "WITH" | "HAVING" | "OFFSET" | "DISTINCT" | "CASE" | "WHEN"
+                | "THEN" | "ELSE" | "END" | "LEFT" | "RIGHT" | "INNER" | "OUTER" | "CROSS"
+                | "TABLES" | "COLUMNS" | "IF" | "SUM" | "COUNT" | "AVG" | "MAX" | "MIN"
+        )
+    };
+    let tokens = extract_tokens(sql);
+    for (index, token) in tokens.iter().enumerate() {
+        if matches!(token.as_str(), "FROM" | "JOIN" | "TABLE" | "DESCRIBE" | "DESC" | "EXPLAIN") {
+            if let Some(next) = tokens.get(index + 1) {
+                let starts_id = next
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphabetic() || c == '_')
+                    .unwrap_or(false);
+                if starts_id && !is_keyword(next) {
+                    return Some(next.to_lowercase().chars().take(40).collect());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 本地时间戳（ISO 8601 含毫秒与时区）。
@@ -536,10 +568,11 @@ fn append_audit_log(entry: &str) {
     }
 }
 
-/// 查询结果全文存档：<当前项目>\.roq\results\YYYYMMDD\HHMMSS-毫秒-<profile>.tsv
-/// （随项目走，gitignore 加一行 `.roq/` 即可忽略）；当前目录是家目录或不可写时
-/// 退回 ~/.roq/results/。返回路径；失败返回 None（仅影响存档，不影响查询结果输出）。
-fn save_result(profile: &str, lines: &[String]) -> Option<String> {
+/// 查询结果全文存档：<当前项目>\.roq\results\YYYYMMDD\HHMMSS-毫秒-<表名>-<profile>.tsv
+/// 文件头为 "# " 元信息块（时间/库/行数上限/SQL），TSV 体从首个非 # 行开始；
+/// 单元格不截断（终端展示才截断）。当前目录是家目录或不可写时退回 ~/.roq/results/。
+/// 返回路径；失败返回 None（仅影响存档，不影响查询结果输出）。
+fn save_result(profile: &str, sql: &str, db: &str, max_rows: usize, lines: &[String]) -> Option<String> {
     let day = chrono::Local::now().format("%Y%m%d").to_string();
     let stamp = chrono::Local::now().format("%H%M%S-%3f").to_string();
     // 候选目录：项目目录优先，工具目录兜底。
@@ -558,8 +591,15 @@ fn save_result(profile: &str, lines: &[String]) -> Option<String> {
         if fs::create_dir_all(&dir).is_err() {
             continue;
         }
-        let path = dir.join(format!("{}-{}.tsv", stamp, profile));
-        if fs::write(&path, format!("{}\n", lines.join("\n"))).is_ok() {
+        let slug = table_slug(sql).unwrap_or_else(|| "query".to_string());
+        let path = dir.join(format!("{}-{}-{}.tsv", stamp, slug, profile));
+        let mut body = String::new();
+        body.push_str(&format!("# 时间: {}\n", now_local()));
+        body.push_str(&format!("# 库: {}（profile={}）\n", db, profile));
+        body.push_str(&format!("# 行数上限: {}\n", max_rows));
+        body.push_str(&format!("# SQL: {}\n", sql.replace('\n', " ")));
+        body.push_str(&lines.join("\n"));
+        if fs::write(&path, format!("{}\n", body)).is_ok() {
             return Some(path.display().to_string());
         }
     }
@@ -759,7 +799,7 @@ fn run() -> ExitCode {
             Err(e) => {
                 let _ = out.flush();
                 eprintln!("[roq] 读取行失败：{}", e);
-                let partial = save_result(&cli.profile, &lines).unwrap_or_default();
+                let partial = save_result(&cli.profile, &sql, &profile.database, cli.max_rows, &lines).unwrap_or_default();
                 append_audit_log(&audit_line(
                     &cli.profile,
                     &profile.database,
@@ -774,21 +814,21 @@ fn run() -> ExitCode {
                 return ExitCode::from(3);
             }
         };
-        let cells: Vec<String> = row
-            .unwrap()
-            .into_iter()
-            .map(|value| render_cell(value, cli.max_cell))
-            .collect();
-        let line = cells.join("\t");
-        let _ = writeln!(out, "{}", line);
-        lines.push(line);
+        let full: Vec<String> = row.unwrap().into_iter().map(escape_cell).collect();
+        let display: String = full
+            .iter()
+            .map(|cell| truncate_cell(cell.clone(), cli.max_cell))
+            .collect::<Vec<_>>()
+            .join("\t");
+        let _ = writeln!(out, "{}", display);
+        lines.push(full.join("\t"));
         rows_out += 1;
     }
     if result.next().is_some() {
         truncated = true;
     }
     let _ = out.flush();
-    let result_file = save_result(&cli.profile, &lines).unwrap_or_default();
+    let result_file = save_result(&cli.profile, &sql, &profile.database, cli.max_rows, &lines).unwrap_or_default();
     eprintln!(
         "[roq] profile={} db={} 行数={}{} 耗时={}ms（会话只读）存档={}",
         cli.profile,
