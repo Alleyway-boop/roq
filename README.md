@@ -15,7 +15,19 @@ roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--config 路径] [--li
 
 ## 连接配置
 
-默认加载（存在即生效，两者可并用；Windows 在 `%USERPROFILE%` 下，Linux/macOS 在 `$HOME` 下）：
+配置**无需手写**，用内置子命令管理：
+
+```
+roq config add <名> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径]
+roq config test <名>        # 连接 + 只读断言 + 版本探测
+roq config remove <名> --yes
+roq config list
+```
+
+`add` 默认写入 `~/.roq/profiles.d/<名>.conf`（一配置一文件，含凭据勿外传），写后回读校验；
+同名已存在时拒绝覆盖（修改请手动编辑）；`remove` 只删"仅含该配置节"的文件且须 `--yes`，多节文件提示手动编辑。
+
+手工方式仍然支持。默认加载（存在即生效，两者可并用；Windows 在 `%USERPROFILE%` 下，Linux/macOS 在 `$HOME` 下）：
 
 - `~/.roq/profiles.conf` —— 单文件，所有 [节] 混在一起
 - `~/.roq/profiles.d/*.conf` —— **目录扫描，一项目一文件**（如 `project-a.conf`、`project-b.conf`）
@@ -26,11 +38,11 @@ roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--config 路径] [--li
 ```ini
 [名称]
 host=数据库主机
-port=3306
+port=3306          ; 缺省 3306
 user=用户
 password=密码
 database=库名
-ssl=true          ; 可选，是否启用 TLS
+ssl=true           ; 可选，是否启用 TLS（部分云数据库端点不宣告 TLS，加了反而握手失败）
 ```
 
 `--profile` 缺省为 `dev`；建议生产库命名为 `prod` 并显式指定（工具会打印提醒）。

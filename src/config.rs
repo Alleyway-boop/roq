@@ -32,7 +32,7 @@ pub fn default_config_base() -> Result<PathBuf, String> {
 }
 
 /// 解析极简 INI：[节名] + key=value。值不支持换行；# 或 ; 开头为注释行。
-fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String> {
+pub fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String> {
     let text = fs::read_to_string(path)
         .map_err(|e| format!("读取配置 {} 失败：{}", path.display(), e))?;
     let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -128,34 +128,38 @@ fn merge_profiles(
     Ok(())
 }
 
+/// 默认配置文件清单：~/.roq/profiles.conf（存在时）+ ~/.roq/profiles.d/*.conf（按名排序）。
+pub fn default_config_files() -> Result<Vec<PathBuf>, String> {
+    let base = default_config_base()?;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let single = base.join("profiles.conf");
+    if single.is_file() {
+        files.push(single);
+    }
+    let dir = base.join("profiles.d");
+    if dir.is_dir() {
+        files.extend(list_conf_files(&dir)?);
+    }
+    Ok(files)
+}
+
 /// 收集配置来源并加载全部 profile。
 /// `config` 来自 --config（文件或目录，目录则扫描其中 *.conf，一项目一文件）；
-/// None 时默认加载 ~/.roq/profiles.conf（存在时）+ ~/.roq/profiles.d/*.conf（存在时）。
+/// None 时加载默认清单（profiles.conf + profiles.d/*.conf）。
 pub fn load_config_sources(config: Option<&PathBuf>) -> Result<HashMap<String, Profile>, String> {
-    let mut sources: Vec<PathBuf> = Vec::new();
-    match config {
+    let sources: Vec<PathBuf> = match config {
         Some(path) => {
             if !path.exists() {
                 return Err(format!("--config 路径不存在：{}", path.display()));
             }
-            sources.push(path.clone());
+            vec![path.clone()]
         }
-        None => {
-            let base = default_config_base()?;
-            let single = base.join("profiles.conf");
-            if single.is_file() {
-                sources.push(single);
-            }
-            let dir = base.join("profiles.d");
-            if dir.is_dir() {
-                sources.push(dir);
-            }
-        }
-    }
+        None => default_config_files()?,
+    };
     if sources.is_empty() {
         let base = default_config_base()?;
         return Err(format!(
-            "未找到任何配置。可创建 {} 或 {} 下的 *.conf（一项目一文件），或用 --config 指定文件/目录。",
+            "未找到任何配置。可运行 roq config add <名> --host ... 创建，或手工建立 {} / {} 下的 *.conf，或用 --config 指定文件/目录。",
             base.join("profiles.conf").display(),
             base.join("profiles.d").display()
         ));
@@ -171,6 +175,16 @@ pub fn load_config_sources(config: Option<&PathBuf>) -> Result<HashMap<String, P
         }
     }
     Ok(profiles)
+}
+
+/// 打印 profile 清单（--list 与 config list 共用）。
+pub fn print_profiles(profiles: &HashMap<String, Profile>) {
+    let mut entries: Vec<(&String, &Profile)> = profiles.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    println!("可用配置（{}）：", entries.len());
+    for (name, profile) in entries {
+        println!("  {:<12} <- {}", name, profile.source);
+    }
 }
 
 #[cfg(test)]

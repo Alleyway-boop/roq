@@ -16,6 +16,35 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 }
 
+/// 顶层命令：查询（默认）或 config 子命令。
+pub enum Command {
+    Query(Cli),
+    Config(ConfigCmd),
+}
+
+/// `roq config` 子命令集。
+pub enum ConfigCmd {
+    Add {
+        name: String,
+        host: String,
+        port: u16,
+        user: String,
+        password: String,
+        database: String,
+        ssl: bool,
+        file: Option<PathBuf>,
+    },
+    Remove {
+        name: String,
+        file: Option<PathBuf>,
+        yes: bool,
+    },
+    Test {
+        name: String,
+    },
+    List,
+}
+
 pub fn usage() -> String {
     [
         "roq —— 只读 MySQL 查询工具".to_string(),
@@ -35,7 +64,111 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-/// 解析命令行。--help/--version 以 Err 返回完整文本（调用方直接打印后正常退出）。
+/// 顶层解析：`config` 开头走配置子命令，其余走查询。
+pub fn parse_command(args: &[String]) -> Result<Command, String> {
+    if args.first().map(String::as_str) == Some("config") {
+        return Ok(Command::Config(parse_config_cmd(&args[1..])?));
+    }
+    Ok(Command::Query(parse_args(args)?))
+}
+
+fn config_usage() -> String {
+    [
+        "roq config —— 连接配置管理".to_string(),
+        String::new(),
+        "用法:".to_string(),
+        "  roq config add <名> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径]".to_string(),
+        "  roq config remove <名> [--file 路径] --yes".to_string(),
+        "  roq config test <名>".to_string(),
+        "  roq config list".to_string(),
+        String::new(),
+        "add 默认写入 ~/.roq/profiles.d/<名>.conf（一配置一文件）；同名已存在时拒绝，修改请手动编辑。".to_string(),
+        "remove 仅当目标文件只含这一个配置节时才删文件，否则提示手动编辑；须 --yes 确认。".to_string(),
+    ]
+    .join("\n")
+}
+
+fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
+    let mut name: Option<String> = None;
+    let mut host: Option<String> = None;
+    let mut port: u16 = 3306;
+    let mut user: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut database: Option<String> = None;
+    let mut ssl = false;
+    let mut file: Option<PathBuf> = None;
+    let mut yes = false;
+    let mut action: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let take = |slot: &mut Option<String>, flag: &str, i: usize| -> Result<(), String> {
+            let Some(v) = args.get(i + 1) else { return Err(format!("{} 缺少参数", flag)) };
+            *slot = Some(v.clone());
+            Ok(())
+        };
+        match arg.as_str() {
+            "--help" | "-h" => return Err(config_usage()),
+            "add" | "remove" | "test" | "list" if action.is_none() => action = Some(arg),
+            "--host" => {
+                take(&mut host, arg, i)?;
+                i += 1;
+            }
+            "--user" => {
+                take(&mut user, arg, i)?;
+                i += 1;
+            }
+            "--password" => {
+                take(&mut password, arg, i)?;
+                i += 1;
+            }
+            "--database" => {
+                take(&mut database, arg, i)?;
+                i += 1;
+            }
+            "--file" => {
+                let Some(v) = args.get(i + 1) else { return Err("--file 缺少参数".into()) };
+                file = Some(PathBuf::from(v));
+                i += 1;
+            }
+            "--port" => {
+                let Some(v) = args.get(i + 1) else { return Err("--port 缺少参数".into()) };
+                port = v.parse().map_err(|_| "--port 需要整数")?;
+                i += 1;
+            }
+            "--ssl" => ssl = true,
+            "--yes" => yes = true,
+            other if action.is_some() && name.is_none() && !other.starts_with('-') => {
+                name = Some(other.to_string())
+            }
+            other => return Err(format!("无法识别的参数：{}", other)),
+        }
+        i += 1;
+    }
+    match action {
+        Some("list") => Ok(ConfigCmd::List),
+        Some("test") => Ok(ConfigCmd::Test {
+            name: name.ok_or("config test 需要 <名>")?,
+        }),
+        Some("remove") => Ok(ConfigCmd::Remove {
+            name: name.ok_or("config remove 需要 <名>")?,
+            file,
+            yes,
+        }),
+        Some("add") => Ok(ConfigCmd::Add {
+            name: name.ok_or("config add 需要 <名>")?,
+            host: host.ok_or("config add 缺少 --host")?,
+            port,
+            user: user.ok_or("config add 缺少 --user")?,
+            password: password.ok_or("config add 缺少 --password")?,
+            database: database.ok_or("config add 缺少 --database")?,
+            ssl,
+            file,
+        }),
+        _ => Err(config_usage()),
+    }
+}
+/// 解析查询命令行参数。--help/--version 以 Err 返回完整文本（调用方直接打印后正常退出）。
 pub fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut cli = Cli {
         profile: "dev".to_string(),

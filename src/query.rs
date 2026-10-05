@@ -21,6 +21,23 @@ const READ_TIMEOUT_SECS: u64 = 60;
 /// 服务端 SELECT 执行时间上限（毫秒），防慢查询拖垮库。
 const MAX_EXECUTION_TIME_MS: u32 = 30_000;
 
+/// 由 profile 构建连接参数（查询执行与 config test 共用）。
+pub fn build_opts(profile: &Profile) -> Opts {
+    let mut builder = OptsBuilder::new()
+        .ip_or_hostname(Some(profile.host.clone()))
+        .tcp_port(profile.port)
+        .user(Some(profile.user.clone()))
+        .pass(Some(profile.password.clone()))
+        .db_name(Some(profile.database.clone()))
+        .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+        .read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
+    // 若配置声明 ssl=true 则启用 TLS（不校验证书，等价 JDBC useSSL=true）。
+    if profile.ssl {
+        builder = builder.ssl_opts(Some(SslOpts::default()));
+    }
+    Opts::from(builder)
+}
+
 /// 执行一条已过闸门的查询。所有退出路径（含失败）都会写审计日志。
 pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     if cli.profile == "prod" {
@@ -47,19 +64,7 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         ));
         ExitCode::from(code)
     };
-    let mut builder = OptsBuilder::new()
-        .ip_or_hostname(Some(profile.host.clone()))
-        .tcp_port(profile.port)
-        .user(Some(profile.user.clone()))
-        .pass(Some(profile.password.clone()))
-        .db_name(Some(profile.database.clone()))
-        .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
-        .read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
-    // 若配置声明 ssl=true 则启用 TLS（不校验证书，等价 JDBC useSSL=true）。
-    if profile.ssl {
-        builder = builder.ssl_opts(Some(SslOpts::default()));
-    }
-    let mut conn = match Conn::new(Opts::from(builder)) {
+    let mut conn = match Conn::new(build_opts(profile)) {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("[roq] 连接失败：{}", e);
