@@ -10,12 +10,57 @@ const LEADING_ALLOWED: &[&str] = &[
 
 /// 全句扫描禁词：写/管理/文件/锁类。
 const FORBIDDEN_TOKENS: &[&str] = &[
-    "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME",
-    "GRANT", "REVOKE", "LOCK", "UNLOCK", "CALL", "SET", "LOAD", "HANDLER", "DO", "INTO",
-    "OUTFILE", "DUMPFILE", "KILL", "SHUTDOWN", "PREPARE", "EXECUTE", "DEALLOCATE", "SIGNAL",
-    "RESIGNAL", "RESET", "PURGE", "ANALYZE", "OPTIMIZE", "REPAIR", "FLUSH", "INSTALL",
-    "UNINSTALL", "IMPORT", "BINLOG", "CACHE", "START", "STOP", "XA", "SAVEPOINT", "ROLLBACK",
-    "COMMIT", "CHANGE", "LOAD_FILE", "GET_LOCK", "RELEASE_LOCK", "BENCHMARK", "SLEEP",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "REPLACE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "TRUNCATE",
+    "RENAME",
+    "GRANT",
+    "REVOKE",
+    "LOCK",
+    "UNLOCK",
+    "CALL",
+    "SET",
+    "LOAD",
+    "HANDLER",
+    "DO",
+    "INTO",
+    "OUTFILE",
+    "DUMPFILE",
+    "KILL",
+    "SHUTDOWN",
+    "PREPARE",
+    "EXECUTE",
+    "DEALLOCATE",
+    "SIGNAL",
+    "RESIGNAL",
+    "RESET",
+    "PURGE",
+    "ANALYZE",
+    "OPTIMIZE",
+    "REPAIR",
+    "FLUSH",
+    "INSTALL",
+    "UNINSTALL",
+    "IMPORT",
+    "BINLOG",
+    "CACHE",
+    "START",
+    "STOP",
+    "XA",
+    "SAVEPOINT",
+    "ROLLBACK",
+    "COMMIT",
+    "CHANGE",
+    "LOAD_FILE",
+    "GET_LOCK",
+    "RELEASE_LOCK",
+    "BENCHMARK",
+    "SLEEP",
 ];
 
 /// 语句长度上限（字节），防止把整段内容塞进参数。
@@ -91,7 +136,11 @@ fn strip_and_check(sql: &str) -> Result<String, String> {
             },
             ScanState::Single | ScanState::Double => {
                 out.push(c);
-                let quote = if state == ScanState::Single { '\'' } else { '"' };
+                let quote = if state == ScanState::Single {
+                    '\''
+                } else {
+                    '"'
+                };
                 if c == '\\' && i + 1 < chars.len() {
                     out.push(chars[i + 1]);
                     i += 1;
@@ -114,7 +163,10 @@ fn strip_and_check(sql: &str) -> Result<String, String> {
         }
         i += 1;
     }
-    if matches!(state, ScanState::Single | ScanState::Double | ScanState::Backtick) {
+    if matches!(
+        state,
+        ScanState::Single | ScanState::Double | ScanState::Backtick
+    ) {
         return Err("引号未闭合".to_string());
     }
     Ok(out)
@@ -160,7 +212,10 @@ pub fn gate(sql_raw: &str) -> Result<String, String> {
     if matches!(first.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES") {
         for token in &tokens {
             if FORBIDDEN_TOKENS.contains(&token.as_str()) {
-                return Err(format!("语句包含写/管理类关键词 {}；本工具仅允许只读查询", token));
+                return Err(format!(
+                    "语句包含写/管理类关键词 {}；本工具仅允许只读查询",
+                    token
+                ));
             }
         }
     }
