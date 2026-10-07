@@ -29,7 +29,8 @@ pub enum ConfigCmd {
         host: String,
         port: u16,
         user: String,
-        password: String,
+        password: Option<String>,
+        password_env: Option<String>,
         database: String,
         ssl: bool,
         file: Option<PathBuf>,
@@ -94,6 +95,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     let mut port: u16 = 3306;
     let mut user: Option<String> = None;
     let mut password: Option<String> = None;
+    let mut password_env: Option<String> = None;
     let mut database: Option<String> = None;
     let mut ssl = false;
     let mut file: Option<PathBuf> = None;
@@ -103,7 +105,9 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     while i < args.len() {
         let arg = &args[i];
         let take = |slot: &mut Option<String>, flag: &str, i: usize| -> Result<(), String> {
-            let Some(v) = args.get(i + 1) else { return Err(format!("{} 缺少参数", flag)) };
+            let Some(v) = args.get(i + 1) else {
+                return Err(format!("{} 缺少参数", flag));
+            };
             *slot = Some(v.clone());
             Ok(())
         };
@@ -122,17 +126,25 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
                 take(&mut password, arg, i)?;
                 i += 1;
             }
+            "--password-env" => {
+                take(&mut password_env, arg, i)?;
+                i += 1;
+            }
             "--database" => {
                 take(&mut database, arg, i)?;
                 i += 1;
             }
             "--file" => {
-                let Some(v) = args.get(i + 1) else { return Err("--file 缺少参数".into()) };
+                let Some(v) = args.get(i + 1) else {
+                    return Err("--file 缺少参数".into());
+                };
                 file = Some(PathBuf::from(v));
                 i += 1;
             }
             "--port" => {
-                let Some(v) = args.get(i + 1) else { return Err("--port 缺少参数".into()) };
+                let Some(v) = args.get(i + 1) else {
+                    return Err("--port 缺少参数".into());
+                };
                 port = v.parse().map_err(|_| "--port 需要整数")?;
                 i += 1;
             }
@@ -160,7 +172,8 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
             host: host.ok_or("config add 缺少 --host")?,
             port,
             user: user.ok_or("config add 缺少 --user")?,
-            password: password.ok_or("config add 缺少 --password")?,
+            password,
+            password_env,
             database: database.ok_or("config add 缺少 --database")?,
             ssl,
             file,
@@ -188,22 +201,30 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
             "--version" | "-v" => return Err(format!("roq {}", env!("CARGO_PKG_VERSION"))),
             "--list" => cli.list = true,
             "--config" => {
-                let Some(v) = next() else { return Err("--config 缺少参数".into()) };
+                let Some(v) = next() else {
+                    return Err("--config 缺少参数".into());
+                };
                 cli.config = Some(PathBuf::from(v));
                 i += 1;
             }
             "--profile" | "-p" => {
-                let Some(v) = next() else { return Err("--profile 缺少参数".into()) };
+                let Some(v) = next() else {
+                    return Err("--profile 缺少参数".into());
+                };
                 cli.profile = v;
                 i += 1;
             }
             "--max-rows" => {
-                let Some(v) = next() else { return Err("--max-rows 缺少参数".into()) };
+                let Some(v) = next() else {
+                    return Err("--max-rows 缺少参数".into());
+                };
                 cli.max_rows = v.parse().map_err(|_| "--max-rows 需要正整数")?;
                 i += 1;
             }
             "--max-cell" => {
-                let Some(v) = next() else { return Err("--max-cell 缺少参数".into()) };
+                let Some(v) = next() else {
+                    return Err("--max-cell 缺少参数".into());
+                };
                 cli.max_cell = v.parse().map_err(|_| "--max-cell 需要正整数")?;
                 i += 1;
             }

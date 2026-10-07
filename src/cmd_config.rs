@@ -16,19 +16,35 @@ use crate::query::build_opts;
 
 pub fn run(cmd: ConfigCmd) -> ExitCode {
     let result = match cmd {
-        ConfigCmd::List => {
-            match load_config_sources(None) {
-                Ok(profiles) => {
-                    print_profiles(&profiles);
-                    return ExitCode::from(0);
-                }
-                Err(msg) => Err(msg),
+        ConfigCmd::List => match load_config_sources(None) {
+            Ok(profiles) => {
+                print_profiles(&profiles);
+                return ExitCode::from(0);
             }
-        }
+            Err(msg) => Err(msg),
+        },
         // 其余分支返回 Result<String, String>，统一在下方出口打印/退出
-        ConfigCmd::Add { name, host, port, user, password, database, ssl, file } => {
-            add(&name, &host, port, &user, &password, &database, ssl, file)
-        }
+        ConfigCmd::Add {
+            name,
+            host,
+            port,
+            user,
+            password,
+            password_env,
+            database,
+            ssl,
+            file,
+        } => add(
+            &name,
+            &host,
+            port,
+            &user,
+            password.as_deref(),
+            password_env.as_deref(),
+            &database,
+            ssl,
+            file,
+        ),
         ConfigCmd::Remove { name, file, yes } => remove(&name, file, yes),
         ConfigCmd::Test { name } => test(&name),
     };
@@ -64,11 +80,21 @@ fn add(
     host: &str,
     port: u16,
     user: &str,
-    password: &str,
+    password: Option<&str>,
+    password_env: Option<&str>,
     database: &str,
     ssl: bool,
     file: Option<PathBuf>,
 ) -> Result<String, String> {
+    // 密码两形式互斥：并存说明调用方有歧义，直接拒绝。
+    let secret_line = match (password, password_env) {
+        (Some(_), Some(_)) => {
+            return Err("--password 与 --password-env 二选一，请只提供其一".to_string());
+        }
+        (Some(plain), _) => format!("password={}\n", plain),
+        (None, Some(var)) => format!("password_env={}\n", var),
+        (None, None) => return Err("缺少 --password 或 --password-env".to_string()),
+    };
     let target = match file {
         Some(path) => path,
         None => {
@@ -79,12 +105,12 @@ fn add(
         }
     };
     let section = format!(
-        "[{}]\nhost={}\nport={}\nuser={}\npassword={}\ndatabase={}{}\n",
+        "[{}]\nhost={}\nport={}\nuser={}\n{}database={}{}\n",
         name,
         host,
         port,
         user,
-        password,
+        secret_line,
         database,
         if ssl { "\nssl=true" } else { "" }
     );
@@ -115,7 +141,11 @@ fn add(
     load_profiles(&target)?
         .get(name)
         .ok_or_else(|| "写入后回读校验失败".to_string())?;
-    Ok(format!("[{}] 已写入 {}（回读校验通过）", name, target.display()))
+    Ok(format!(
+        "[{}] 已写入 {}（回读校验通过）",
+        name,
+        target.display()
+    ))
 }
 
 fn remove(name: &str, file: Option<PathBuf>, yes: bool) -> Result<String, String> {
@@ -146,7 +176,11 @@ fn remove(name: &str, file: Option<PathBuf>, yes: bool) -> Result<String, String
             }
             fs::remove_file(&source)
                 .map_err(|e| format!("删除 {} 失败：{}", source.display(), e))?;
-            return Ok(format!("已删除 {}（含唯一配置 [{}]）", source.display(), name));
+            return Ok(format!(
+                "已删除 {}（含唯一配置 [{}]）",
+                source.display(),
+                name
+            ));
         }
     }
     Err(format!("未找到 [{}]", name))
@@ -157,7 +191,10 @@ fn test(name: &str) -> Result<String, String> {
     let profile = profiles
         .get(name)
         .ok_or_else(|| format!("[{}] 不存在；roq config list 查看全部", name))?;
-    let mut conn = Conn::new(build_opts(profile))
+    let password = profile
+        .resolved_password()
+        .map_err(|e| format!("[{}] {}", name, e))?;
+    let mut conn = Conn::new(build_opts(profile, &password))
         .map_err(|e| format!("[{}] 连接失败：{}", name, e))?;
     conn.query_drop("SET SESSION TRANSACTION READ ONLY")
         .map_err(|e| format!("[{}] 设置会话只读失败：{}", name, e))?;
@@ -191,15 +228,48 @@ mod tests {
     fn add_creates_parseable_file_and_refuses_duplicate() {
         let path = temp_conf("add");
         let _ = fs::remove_file(&path);
-        let msg = add("demo", "h", 3307, "u", "p", "d", true, Some(path.clone())).unwrap();
+        let msg = add(
+            "demo",
+            "h",
+            3307,
+            "u",
+            Some("p"),
+            None,
+            "d",
+            true,
+            Some(path.clone()),
+        )
+        .unwrap();
         assert!(msg.contains("回读校验通过"));
         let profiles = load_profiles(&path).unwrap();
         assert_eq!(profiles["demo"].port, 3307);
         assert!(profiles["demo"].ssl);
-        let err = add("demo", "h2", 3306, "u2", "p2", "d2", false, Some(path.clone())).unwrap_err();
+        let err = add(
+            "demo",
+            "h2",
+            3306,
+            "u2",
+            Some("p2"),
+            None,
+            "d2",
+            false,
+            Some(path.clone()),
+        )
+        .unwrap_err();
         assert!(err.contains("已存在"));
         // 追加第二个配置到同一文件：既有内容与注释保留
-        add("other", "h2", 3306, "u2", "p2", "d2", false, Some(path.clone())).unwrap();
+        add(
+            "other",
+            "h2",
+            3306,
+            "u2",
+            Some("p2"),
+            None,
+            "d2",
+            false,
+            Some(path.clone()),
+        )
+        .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("# roq 连接配置"));
         let profiles = load_profiles(&path).unwrap();
@@ -209,22 +279,108 @@ mod tests {
 
     #[test]
     fn add_rejects_unsafe_default_filename() {
-        let err = add("bad/name", "h", 3306, "u", "p", "d", false, None).unwrap_err();
+        let err = add(
+            "bad/name",
+            "h",
+            3306,
+            "u",
+            Some("p"),
+            None,
+            "d",
+            false,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("仅允许"));
+    }
+
+    #[test]
+    fn add_with_password_env_writes_env_key_without_requiring_env() {
+        let path = temp_conf("penv");
+        let _ = fs::remove_file(&path);
+        add(
+            "envy",
+            "h",
+            3306,
+            "u",
+            None,
+            Some("MY_DB_PWD"),
+            "d",
+            false,
+            Some(path.clone()),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("password_env=MY_DB_PWD"));
+        assert!(!text.contains("\npassword="));
+        // 回读校验不依赖当前 shell 环境（未设置 MY_DB_PWD 也能通过）
+        let profiles = load_profiles(&path).unwrap();
+        assert_eq!(profiles["envy"].password_env.as_deref(), Some("MY_DB_PWD"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn add_rejects_both_password_and_password_env() {
+        let err = add(
+            "both",
+            "h",
+            3306,
+            "u",
+            Some("p"),
+            Some("V"),
+            "d",
+            false,
+            Some(temp_conf("penv-x")),
+        )
+        .unwrap_err();
+        assert!(err.contains("二选一"), "报错应说明互斥：{}", err);
     }
 
     #[test]
     fn remove_needs_yes_and_refuses_multi_section_file() {
         let path = temp_conf("rm");
         let _ = fs::remove_file(&path);
-        add("solo", "h", 3306, "u", "p", "d", false, Some(path.clone())).unwrap();
+        add(
+            "solo",
+            "h",
+            3306,
+            "u",
+            Some("p"),
+            None,
+            "d",
+            false,
+            Some(path.clone()),
+        )
+        .unwrap();
         let err = remove("solo", Some(path.clone()), false).unwrap_err();
         assert!(err.contains("--yes"));
         remove("solo", Some(path.clone()), true).unwrap();
         assert!(!path.exists());
 
-        add("a1", "h", 3306, "u", "p", "d", false, Some(path.clone())).unwrap();
-        add("a2", "h", 3306, "u", "p", "d", false, Some(path.clone())).unwrap();
+        add(
+            "a1",
+            "h",
+            3306,
+            "u",
+            Some("p"),
+            None,
+            "d",
+            false,
+            Some(path.clone()),
+        )
+        .unwrap();
+        add(
+            "a2",
+            "h",
+            3306,
+            "u",
+            Some("p"),
+            None,
+            "d",
+            false,
+            Some(path.clone()),
+        )
+        .unwrap();
         let err = remove("a1", Some(path.clone()), true).unwrap_err();
         assert!(err.contains("手动编辑"));
         let _ = fs::remove_file(&path);

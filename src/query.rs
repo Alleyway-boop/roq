@@ -22,12 +22,13 @@ const READ_TIMEOUT_SECS: u64 = 60;
 const MAX_EXECUTION_TIME_MS: u32 = 30_000;
 
 /// 由 profile 构建连接参数（查询执行与 config test 共用）。
-pub fn build_opts(profile: &Profile) -> Opts {
+/// 密码由调用方先经 [`Profile::resolved_password`] 解析后传入。
+pub fn build_opts(profile: &Profile, password: &str) -> Opts {
     let mut builder = OptsBuilder::new()
         .ip_or_hostname(Some(profile.host.clone()))
         .tcp_port(profile.port)
         .user(Some(profile.user.clone()))
-        .pass(Some(profile.password.clone()))
+        .pass(Some(password.to_string()))
         .db_name(Some(profile.database.clone()))
         .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
         .read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
@@ -41,11 +42,20 @@ pub fn build_opts(profile: &Profile) -> Opts {
 /// 执行一条已过闸门的查询。所有退出路径（含失败）都会写审计日志。
 pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     if cli.profile == "prod" {
-        eprintln!("[roq] 注意：正在查询生产库 {}（只读会话）", profile.database);
+        eprintln!(
+            "[roq] 注意：正在查询生产库 {}（只读会话）",
+            profile.database
+        );
     }
     let start = Instant::now();
     // 统一的"记审计并退出"出口，保证失败路径无一漏记。
-    let log_exit = |outcome: &str, reason: &str, rows: usize, truncated: bool, result_file: &str, code: u8| -> ExitCode {
+    let log_exit = |outcome: &str,
+                    reason: &str,
+                    rows: usize,
+                    truncated: bool,
+                    result_file: &str,
+                    code: u8|
+     -> ExitCode {
         let extra = if reason.is_empty() {
             String::new()
         } else {
@@ -64,7 +74,15 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         ));
         ExitCode::from(code)
     };
-    let mut conn = match Conn::new(build_opts(profile)) {
+    // 密码在连接前解析：password_env 引用的变量未设置即中止（不回退明文）。
+    let password = match profile.resolved_password() {
+        Ok(password) => password,
+        Err(reason) => {
+            eprintln!("[roq] {}", reason);
+            return log_exit("config-error", &reason, 0, false, "", 1);
+        }
+    };
+    let mut conn = match Conn::new(build_opts(profile, &password)) {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("[roq] 连接失败：{}", e);
@@ -74,22 +92,43 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     // 第二层防护：会话级只读。失败即中止（不允许降级为可写会话）。
     if let Err(e) = conn.query_drop("SET SESSION TRANSACTION READ ONLY") {
         eprintln!("[roq] 设置会话只读失败（中止查询）：{}", e);
-        return log_exit("connect-error", &format!("session-readonly: {e}"), 0, false, "", 3);
+        return log_exit(
+            "connect-error",
+            &format!("session-readonly: {e}"),
+            0,
+            false,
+            "",
+            3,
+        );
     }
     // 回读断言：防止代理/内核静默忽略 SET，导致会话实际可写。
-    let readonly_flag: Option<String> = match conn.query_first("SELECT @@session.transaction_read_only") {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[roq] 回读只读标志失败（中止查询）：{}", e);
-            return log_exit("connect-error", &format!("verify-readonly: {e}"), 0, false, "", 3);
-        }
-    };
+    let readonly_flag: Option<String> =
+        match conn.query_first("SELECT @@session.transaction_read_only") {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[roq] 回读只读标志失败（中止查询）：{}", e);
+                return log_exit(
+                    "connect-error",
+                    &format!("verify-readonly: {e}"),
+                    0,
+                    false,
+                    "",
+                    3,
+                );
+            }
+        };
     if readonly_flag.as_deref() != Some("1") {
-        eprintln!("[roq] 服务端确认会话非只读（值={:?}），中止查询", readonly_flag);
+        eprintln!(
+            "[roq] 服务端确认会话非只读（值={:?}），中止查询",
+            readonly_flag
+        );
         return log_exit("connect-error", "verify-readonly: flag!=1", 0, false, "", 3);
     }
     // 慢查询保险丝：超时上限。个别内核不支持该变量时仅告警不阻断。
-    if let Err(e) = conn.query_drop(format!("SET SESSION max_execution_time={}", MAX_EXECUTION_TIME_MS)) {
+    if let Err(e) = conn.query_drop(format!(
+        "SET SESSION max_execution_time={}",
+        MAX_EXECUTION_TIME_MS
+    )) {
         eprintln!("[roq] 警告：未能设置 max_execution_time（{}）", e);
     }
     let mut result = match conn.query_iter(sql) {
@@ -119,9 +158,17 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
             Err(e) => {
                 let _ = out.flush();
                 eprintln!("[roq] 读取行失败：{}", e);
-                let partial = save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
-                    .unwrap_or_default();
-                return log_exit("exec-error", &format!("read-row: {e}"), rows_out, false, &partial, 3);
+                let partial =
+                    save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
+                        .unwrap_or_default();
+                return log_exit(
+                    "exec-error",
+                    &format!("read-row: {e}"),
+                    rows_out,
+                    false,
+                    &partial,
+                    3,
+                );
             }
         };
         let full: Vec<String> = row.unwrap().into_iter().map(escape_cell).collect();
@@ -138,16 +185,24 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         truncated = true;
     }
     let _ = out.flush();
-    let result_file = save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
-        .unwrap_or_default();
+    let result_file =
+        save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines).unwrap_or_default();
     eprintln!(
         "[roq] profile={} db={} 行数={}{} 耗时={}ms（会话只读）存档={}",
         cli.profile,
         profile.database,
         rows_out,
-        if truncated { "（已达上限，结果被截断）" } else { "" },
+        if truncated {
+            "（已达上限，结果被截断）"
+        } else {
+            ""
+        },
         start.elapsed().as_millis(),
-        if result_file.is_empty() { "失败" } else { &result_file }
+        if result_file.is_empty() {
+            "失败"
+        } else {
+            &result_file
+        }
     );
     log_exit("ok", "", rows_out, truncated, &result_file, 0)
 }

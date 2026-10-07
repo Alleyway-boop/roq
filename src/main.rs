@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use roq::audit::{append_audit_log, audit_line, json_escape};
 use roq::cli::{parse_command, Cli, Command};
 use roq::cmd_config;
-use roq::config::{load_config_sources, print_profiles, Profile};
+use roq::config::{load_config_sources, print_profiles};
 use roq::gate::gate;
 use roq::query;
 

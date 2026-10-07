@@ -10,12 +10,28 @@ pub struct Profile {
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub password: String,
+    /// 明文密码（与 password_env 二选一）。
+    pub password: Option<String>,
+    /// 密码所在环境变量名（与 password 二选一，凭据不落明文）。
+    pub password_env: Option<String>,
     pub database: String,
     /// 是否启用 TLS（RDS 部分端点不宣告 TLS 能力，强制启用会握手失败）。
     pub ssl: bool,
     /// 来源配置文件路径（多文件扫描时用于 --list 展示与冲突定位）。
     pub source: String,
+}
+
+impl Profile {
+    /// 连接前解析实际密码：password_env 存在则读环境变量（未设置即报错，不回退明文）。
+    pub fn resolved_password(&self) -> Result<String, String> {
+        match (&self.password_env, &self.password) {
+            (Some(var), _) => {
+                env::var(var).map_err(|_| format!("配置引用的环境变量 {} 未设置", var))
+            }
+            (None, Some(plain)) => Ok(plain.clone()),
+            (None, None) => Err("缺少 password 或 password_env".to_string()),
+        }
+    }
 }
 
 /// 用户主目录：优先 HOME（Unix 惯例），回退 USERPROFILE（Windows）。
@@ -33,8 +49,8 @@ pub fn default_config_base() -> Result<PathBuf, String> {
 
 /// 解析极简 INI：[节名] + key=value。值不支持换行；# 或 ; 开头为注释行。
 pub fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("读取配置 {} 失败：{}", path.display(), e))?;
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("读取配置 {} 失败：{}", path.display(), e))?;
     let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut current: Option<String> = None;
     for line in text.lines() {
@@ -68,13 +84,34 @@ pub fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String>
             Some((_, value)) => value.parse().map_err(|_| "port 需为整数".to_string())?,
             None => 3306,
         };
+        // password 与 password_env 二选一：并存报错（避免隐式优先级），全无也报错。
+        let password = kv
+            .iter()
+            .find(|(k, _)| k == "password")
+            .map(|(_, v)| v.clone());
+        let password_env = kv
+            .iter()
+            .find(|(k, _)| k == "password_env")
+            .map(|(_, v)| v.clone());
+        if password.is_some() && password_env.is_some() {
+            return Err(format!(
+                "配置 [{}] 同时定义 password 与 password_env，请二选一",
+                name
+            ));
+        }
+        if password.is_none() && password_env.is_none() {
+            return Err(format!("配置 [{}] 缺少 password 或 password_env", name));
+        }
         let profile = Profile {
             host: get("host")?,
             port,
             user: get("user")?,
-            password: get("password")?,
+            password,
+            password_env,
             database: get("database")?,
-            ssl: kv.iter().any(|(k, v)| k == "ssl" && v.eq_ignore_ascii_case("true")),
+            ssl: kv
+                .iter()
+                .any(|(k, v)| k == "ssl" && v.eq_ignore_ascii_case("true")),
             source: path.display().to_string(),
         };
         if profiles.contains_key(&name) {
@@ -88,10 +125,13 @@ pub fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String>
 /// 目录内按文件名排序的 *.conf 清单（跳过子目录与点开头文件）。
 /// 排序保证多文件加载顺序稳定，便于冲突报错可复现。
 fn list_conf_files(dir: &PathBuf) -> Result<Vec<PathBuf>, String> {
-    let entries = fs::read_dir(dir).map_err(|e| format!("读取目录 {} 失败：{}", dir.display(), e))?;
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("读取目录 {} 失败：{}", dir.display(), e))?;
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let path = entry.map_err(|e| format!("遍历目录 {} 失败：{}", dir.display(), e))?.path();
+        let path = entry
+            .map_err(|e| format!("遍历目录 {} 失败：{}", dir.display(), e))?
+            .path();
         let is_conf = path
             .extension()
             .map(|ext| ext.eq_ignore_ascii_case("conf"))
@@ -193,14 +233,18 @@ mod tests {
 
     fn write_temp(tag: &str, content: &str) -> PathBuf {
         // 并行测试各自独立文件，避免同名互踩
-        let path = std::env::temp_dir().join(format!("roq-test-{}-{}.conf", tag, std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("roq-test-{}-{}.conf", tag, std::process::id()));
         fs::write(&path, content).unwrap();
         path
     }
 
     #[test]
     fn parse_profile_with_defaults_and_ssl() {
-        let path = write_temp("full", "# 注释\n[a]\nhost=h1\nuser=u\npassword=p\ndatabase=d\nssl=true\n");
+        let path = write_temp(
+            "full",
+            "# 注释\n[a]\nhost=h1\nuser=u\npassword=p\ndatabase=d\nssl=true\n",
+        );
         let profiles = load_profiles(&path).unwrap();
         let profile = &profiles["a"];
         assert_eq!(profile.host, "h1");
@@ -215,6 +259,45 @@ mod tests {
         let path = write_temp("missing", "[b]\nhost=h\n");
         let err = load_profiles(&path).unwrap_err();
         assert!(err.contains("[b]"), "报错应指明节名：{}", err);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn password_env_resolves_from_environment() {
+        let var = format!("ROQ_TEST_PWD_OK_{}", std::process::id());
+        std::env::set_var(&var, "s3cret");
+        let content = format!("[e]\nhost=h\nuser=u\npassword_env={}\ndatabase=d\n", var);
+        let path = write_temp("penv-ok", &content);
+        let profiles = load_profiles(&path).unwrap();
+        let profile = &profiles["e"];
+        assert_eq!(profile.password_env.as_deref(), Some(var.as_str()));
+        assert_eq!(profile.resolved_password().unwrap(), "s3cret");
+        std::env::remove_var(&var);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolved_password_fails_closed_when_env_missing() {
+        let var = format!("ROQ_TEST_PWD_MISS_{}", std::process::id());
+        std::env::remove_var(&var);
+        let content = format!("[e]\nhost=h\nuser=u\npassword_env={}\ndatabase=d\n", var);
+        let path = write_temp("penv-miss", &content);
+        let profiles = load_profiles(&path).unwrap();
+        let err = profiles["e"].resolved_password().unwrap_err();
+        assert!(err.contains(&var), "报错应含变量名：{}", err);
+        assert!(err.contains("未设置"), "报错应说明变量未设置：{}", err);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn password_and_password_env_are_exclusive() {
+        let path = write_temp(
+            "penv-both",
+            "[e]\nhost=h\nuser=u\npassword=p\npassword_env=FOO\ndatabase=d\n",
+        );
+        let err = load_profiles(&path).unwrap_err();
+        assert!(err.contains("[e]"), "报错应指明节名：{}", err);
+        assert!(err.contains("password_env"), "报错应说明两键冲突：{}", err);
         let _ = fs::remove_file(&path);
     }
 }
