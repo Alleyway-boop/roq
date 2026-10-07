@@ -69,6 +69,9 @@ pub fn usage() -> String {
         "roq —— 只读 MySQL 查询工具".to_string(),
         String::new(),
         "用法: roq [--profile 名] [--max-rows N] [--max-cell N] [--config 路径] [--list] \"SQL语句\"".to_string(),
+        "      roq tables [--profile 名 ...]              # SHOW TABLES 快捷方式".to_string(),
+        "      roq schema <表|库.表> [--profile 名 ...]   # SHOW CREATE TABLE 快捷方式".to_string(),
+        "      roq explain \"SQL语句\" [--profile 名 ...]  # 自动加 EXPLAIN 前缀".to_string(),
         "      roq --help".to_string(),
         String::new(),
         "  --profile, -p   连接配置名（默认 dev；生产库请显式 --profile prod）".to_string(),
@@ -86,13 +89,64 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-/// 顶层解析：`config` / `log` 开头走对应子命令，其余走查询。
+/// 顶层解析：`config` / `log` / `tables` / `schema` / `explain` 开头走对应子命令，其余走查询。
+/// 快捷子命令只生成 SQL，随后与手写查询走同一条闸门+审计+存档链路。
 pub fn parse_command(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
         Some("config") => Ok(Command::Config(parse_config_cmd(&args[1..])?)),
         Some("log") => Ok(Command::Log(parse_log_cmd(&args[1..])?)),
+        Some("tables") => shortcut_tables(&args[1..]),
+        Some("schema") => shortcut_schema(&args[1..]),
+        Some("explain") => shortcut_explain(&args[1..]),
         _ => Ok(Command::Query(parse_args(args)?)),
     }
+}
+
+fn shortcut_tables(args: &[String]) -> Result<Command, String> {
+    let (mut cli, positional) = parse_query_parts(args)?;
+    if !positional.is_empty() {
+        return Err(format!("tables 不接受位置参数：{}", positional.join(" ")));
+    }
+    cli.sql = Some("SHOW TABLES".to_string());
+    Ok(Command::Query(cli))
+}
+
+fn shortcut_schema(args: &[String]) -> Result<Command, String> {
+    let (mut cli, positional) = parse_query_parts(args)?;
+    let [table] = positional.as_slice() else {
+        return Err("schema 需要恰好一个表名（可用 库.表 两段）".to_string());
+    };
+    cli.sql = Some(build_schema_sql(table)?);
+    Ok(Command::Query(cli))
+}
+
+fn shortcut_explain(args: &[String]) -> Result<Command, String> {
+    let (mut cli, positional) = parse_query_parts(args)?;
+    if positional.is_empty() {
+        return Err("explain 需要 SQL 语句".to_string());
+    }
+    cli.sql = Some(format!("EXPLAIN {}", positional.join(" ")));
+    Ok(Command::Query(cli))
+}
+
+/// 生成 `SHOW CREATE TABLE`：表名限字母/数字/下划线/$，或 `库.表` 两段；
+/// 各段反引号包裹（兼容 order 这类保留字表名）。校验失败即拒绝拼接。
+fn build_schema_sql(table: &str) -> Result<String, String> {
+    let valid_segment = |seg: &str| {
+        !seg.is_empty()
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    };
+    let parts: Vec<&str> = table.split('.').collect();
+    if parts.len() > 2 || !parts.iter().all(|p| valid_segment(p)) {
+        return Err(format!(
+            "表名 {} 不合法（仅允许字母/数字/下划线/$，或 库.表 两段）",
+            table
+        ));
+    }
+    let quoted: Vec<String> = parts.iter().map(|p| format!("`{}`", p)).collect();
+    Ok(format!("SHOW CREATE TABLE {}", quoted.join(".")))
 }
 
 fn log_usage() -> String {
@@ -268,6 +322,16 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
 }
 /// 解析查询命令行参数。--help/--version 以 Err 返回完整文本（调用方直接打印后正常退出）。
 pub fn parse_args(args: &[String]) -> Result<Cli, String> {
+    let (mut cli, sql_parts) = parse_query_parts(args)?;
+    if !sql_parts.is_empty() {
+        cli.sql = Some(sql_parts.join(" "));
+    }
+    Ok(cli)
+}
+
+/// 查询 flag 集与位置参数的公共解析层（查询 / tables / schema / explain 共用）。
+/// 返回填充了 flag 的 Cli 与按序收集的位置参数（查询模式即 SQL 片段）。
+fn parse_query_parts(args: &[String]) -> Result<(Cli, Vec<String>), String> {
     let mut cli = Cli {
         profile: "dev".to_string(),
         sql: None,
@@ -349,10 +413,7 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         }
         i += 1;
     }
-    if !sql_parts.is_empty() {
-        cli.sql = Some(sql_parts.join(" "));
-    }
-    Ok(cli)
+    Ok((cli, sql_parts))
 }
 
 #[cfg(test)]
@@ -401,5 +462,54 @@ mod tests {
         assert_eq!(cli.sql.as_deref(), Some("SELECT 1-2 -3"));
         let cli = parse_args(&["SELECT".to_string(), "-".to_string()]).unwrap();
         assert_eq!(cli.sql.as_deref(), Some("SELECT -"));
+    }
+
+    #[test]
+    fn build_schema_sql_validates_and_backticks_segments() {
+        assert_eq!(
+            build_schema_sql("t_user").unwrap(),
+            "SHOW CREATE TABLE `t_user`"
+        );
+        assert_eq!(
+            build_schema_sql("mydb.t_user").unwrap(),
+            "SHOW CREATE TABLE `mydb`.`t_user`"
+        );
+        for bad in ["", "t; DROP", "ta ble", "a.b.c", "`t`", "t-x"] {
+            assert!(build_schema_sql(bad).is_err(), "应拒绝表名：{:?}", bad);
+        }
+    }
+
+    #[test]
+    fn parse_command_shortcuts_generate_gated_sql() {
+        // tables → SHOW TABLES,且共用查询 flag
+        let Command::Query(cli) = parse_command(&[
+            "tables".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ])
+        .unwrap() else {
+            panic!("tables 应产出 Query 命令");
+        };
+        assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES"));
+        assert_eq!(cli.format, OutputFormat::Json);
+        // schema → SHOW CREATE TABLE(反引号防保留字)
+        let Command::Query(cli) =
+            parse_command(&["schema".to_string(), "t_user".to_string()]).unwrap()
+        else {
+            panic!("schema 应产出 Query 命令");
+        };
+        assert_eq!(cli.sql.as_deref(), Some("SHOW CREATE TABLE `t_user`"));
+        // explain → EXPLAIN 前缀,片段拼接
+        let Command::Query(cli) =
+            parse_command(&["explain".to_string(), "SELECT".to_string(), "1".to_string()]).unwrap()
+        else {
+            panic!("explain 应产出 Query 命令");
+        };
+        assert_eq!(cli.sql.as_deref(), Some("EXPLAIN SELECT 1"));
+        // 错误形态:参数个数与非法表名
+        assert!(parse_command(&["tables".to_string(), "多余".to_string()]).is_err());
+        assert!(parse_command(&["schema".to_string()]).is_err());
+        assert!(parse_command(&["schema".to_string(), "bad name".to_string()]).is_err());
+        assert!(parse_command(&["explain".to_string()]).is_err());
     }
 }
