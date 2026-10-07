@@ -772,6 +772,7 @@ version = "0.4.0"
 dependencies = [
  "chrono",
  "mysql",
+ "serde_json",
 ]
 
 [[package]]

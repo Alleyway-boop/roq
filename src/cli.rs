@@ -28,6 +28,16 @@ pub struct Cli {
 pub enum Command {
     Query(Cli),
     Config(ConfigCmd),
+    Log(LogArgs),
+}
+
+/// `roq log` 子命令参数（默认范围=今天）。
+pub struct LogArgs {
+    pub month: bool,
+    pub last: Option<usize>,
+    pub profile: Option<String>,
+    pub outcome: Option<String>,
+    pub json: bool,
 }
 
 /// `roq config` 子命令集。
@@ -76,12 +86,76 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-/// 顶层解析：`config` 开头走配置子命令，其余走查询。
+/// 顶层解析：`config` / `log` 开头走对应子命令，其余走查询。
 pub fn parse_command(args: &[String]) -> Result<Command, String> {
-    if args.first().map(String::as_str) == Some("config") {
-        return Ok(Command::Config(parse_config_cmd(&args[1..])?));
+    match args.first().map(String::as_str) {
+        Some("config") => Ok(Command::Config(parse_config_cmd(&args[1..])?)),
+        Some("log") => Ok(Command::Log(parse_log_cmd(&args[1..])?)),
+        _ => Ok(Command::Query(parse_args(args)?)),
     }
-    Ok(Command::Query(parse_args(args)?))
+}
+
+fn log_usage() -> String {
+    [
+        "roq log —— 查看审计日志（本月 ~/.roq/logs/roq-YYYYMM.jsonl）".to_string(),
+        String::new(),
+        "用法:".to_string(),
+        "  roq log [--today | --month | --last N] [--profile 名] [--outcome 类别] [--json]"
+            .to_string(),
+        String::new(),
+        "  --today     只看今天（默认）".to_string(),
+        "  --month     看本月全部".to_string(),
+        "  --last N    最近 N 条（不限日期）".to_string(),
+        "  --profile   按配置名过滤".to_string(),
+        "  --outcome   按结果过滤：ok / gate-rejected / connect-error / exec-error / config-error"
+            .to_string(),
+        "  --json      原样输出匹配的 JSONL 行".to_string(),
+    ]
+    .join("\n")
+}
+
+fn parse_log_cmd(args: &[String]) -> Result<LogArgs, String> {
+    let mut log_args = LogArgs {
+        month: false,
+        last: None,
+        profile: None,
+        outcome: None,
+        json: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--help" | "-h" => return Err(log_usage()),
+            "--today" => {} // 默认行为，显式写出也接受
+            "--month" => log_args.month = true,
+            "--last" => {
+                let Some(v) = args.get(i + 1) else {
+                    return Err("--last 缺少参数".into());
+                };
+                log_args.last = Some(v.parse().map_err(|_| "--last 需要正整数")?);
+                i += 1;
+            }
+            "--profile" => {
+                let Some(v) = args.get(i + 1) else {
+                    return Err("--profile 缺少参数".into());
+                };
+                log_args.profile = Some(v.clone());
+                i += 1;
+            }
+            "--outcome" => {
+                let Some(v) = args.get(i + 1) else {
+                    return Err("--outcome 缺少参数".into());
+                };
+                log_args.outcome = Some(v.clone());
+                i += 1;
+            }
+            "--json" => log_args.json = true,
+            other => return Err(format!("无法识别的参数：{}", other)),
+        }
+        i += 1;
+    }
+    Ok(log_args)
 }
 
 fn config_usage() -> String {

@@ -14,6 +14,7 @@
 pub mod audit;
 pub mod cli;
 pub mod cmd_config;
+pub mod cmd_log;
 pub mod config;
 pub mod gate;
 pub mod query;
