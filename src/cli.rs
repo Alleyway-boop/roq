@@ -331,7 +331,17 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
                 i += 1;
             }
             "--quiet" | "-q" => cli.quiet = true,
-            _ => sql_parts.push(arg.clone()),
+            _ => {
+                // 未知 flag（"-" 开头且第二字符为字母）直接报用法错误，
+                // 不再静默拼进 SQL 以莫名其妙的闸门拒绝收场；
+                // "-3"、"-" 等非 flag 形态仍视作 SQL 片段（负数字面量）。
+                let looks_like_flag = arg.starts_with('-')
+                    && arg.chars().nth(1).is_some_and(|c| c.is_ascii_alphabetic());
+                if looks_like_flag {
+                    return Err(format!("无法识别的参数：{}（--help 查看用法）", arg));
+                }
+                sql_parts.push(arg.clone());
+            }
         }
         i += 1;
     }
@@ -370,5 +380,22 @@ mod tests {
     fn parse_args_rejects_missing_out_value() {
         let err = parse_args(&["--out".to_string()]).unwrap_err();
         assert!(err.contains("--out"), "报错应指出 --out：{}", err);
+    }
+
+    #[test]
+    fn parse_args_rejects_unknown_flags() {
+        let err = parse_args(&["--foo".to_string(), "SELECT 1".to_string()]).unwrap_err();
+        assert!(err.contains("--foo"), "未知 flag 应报用法错误：{}", err);
+        let err = parse_args(&["-x".to_string()]).unwrap_err();
+        assert!(err.contains("-x"), "短 flag 形态也应报错：{}", err);
+    }
+
+    #[test]
+    fn parse_args_keeps_dash_prefixed_literals_as_sql() {
+        // 负数字面量与单独 "-" 不是 flag，仍作为 SQL 片段拼接
+        let cli = parse_args(&["SELECT".to_string(), "1-2".to_string(), "-3".to_string()]).unwrap();
+        assert_eq!(cli.sql.as_deref(), Some("SELECT 1-2 -3"));
+        let cli = parse_args(&["SELECT".to_string(), "-".to_string()]).unwrap();
+        assert_eq!(cli.sql.as_deref(), Some("SELECT -"));
     }
 }
