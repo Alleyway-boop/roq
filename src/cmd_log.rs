@@ -54,6 +54,43 @@ pub fn read_tail_lines(path: &Path, last: Option<usize>) -> Vec<String> {
     lines
 }
 
+/// logs 目录下的月度日志文件，文件名倒序（最新在前；roq-YYYYMM 字典序即时间序）。
+pub fn log_files_desc(dir: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            name.starts_with("roq-") && name.ends_with(".jsonl")
+        })
+        .collect();
+    files.sort();
+    files.reverse();
+    files
+}
+
+/// 跨文件从尾部收集 n 条：files 须按最新在前传入；返回整体时间正序（越往后越新）。
+pub fn collect_tail_lines(files: &[std::path::PathBuf], n: usize) -> Vec<String> {
+    let mut collected: Vec<String> = Vec::new();
+    for file in files {
+        if collected.len() >= n {
+            break;
+        }
+        let need = n - collected.len();
+        // 更旧的文件段拼在前面,保持整体时间正序
+        let mut merged = read_tail_lines(file, Some(need));
+        merged.append(&mut collected);
+        collected = merged;
+    }
+    collected
+}
+
 /// 人类可读的一行摘要：时分秒 profile db outcome 行数 耗时 SQL(截 60 字符)。
 pub fn format_line(value: &serde_json::Value) -> String {
     let ts = value.get("ts").and_then(|v| v.as_str()).unwrap_or("");
@@ -85,7 +122,7 @@ pub fn run(args: LogArgs) -> ExitCode {
         println!("本月（{}）暂无审计日志。", file.display());
         return ExitCode::from(0);
     }
-    // 默认只看今天；--month 看整月，--last N 取最近 N 条（不限日期）。
+    // 默认只看今天；--month 看整月，--last N 取最近 N 条（跨月，不限日期）。
     let day_prefix = if args.month || args.last.is_some() {
         None
     } else {
@@ -96,8 +133,15 @@ pub fn run(args: LogArgs) -> ExitCode {
         outcome: args.outcome.clone(),
         day_prefix,
     };
+    // --last 跨月扫描 logs/ 下全部月度文件;today/month 只看当月文件
+    let lines = if let Some(n) = args.last {
+        let logs_dir = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        collect_tail_lines(&log_files_desc(&logs_dir), n)
+    } else {
+        read_tail_lines(&file, None)
+    };
     let mut shown = 0usize;
-    for line in &read_tail_lines(&file, args.last) {
+    for line in &lines {
         if !line_matches(line, &filter) {
             continue;
         }
@@ -210,5 +254,44 @@ mod tests {
         let all = read_tail_lines(&path, None);
         assert_eq!(all.len(), 5);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn collect_tail_lines_spans_months_in_time_order() {
+        let dir = std::env::temp_dir().join(format!("roq-logdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 九月 3 条(i=1..3)、十月 3 条(i=4..6);要 4 条 → 十月 3 条 + 九月最后 1 条,整体时间正序
+        let sep: String = (1..=3)
+            .map(|i| format!("{{\"i\":{}}}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let oct: String = (4..=6)
+            .map(|i| format!("{{\"i\":{}}}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("roq-202609.jsonl"), format!("{}\n", sep)).unwrap();
+        std::fs::write(dir.join("roq-202610.jsonl"), format!("{}\n", oct)).unwrap();
+        // 文件按倒序传(最新在前)
+        let files = log_files_desc(&dir);
+        assert_eq!(files.len(), 2, "应发现两个日志文件");
+        assert!(
+            files[0].to_string_lossy().contains("202610"),
+            "最新文件在前：{:?}",
+            files[0]
+        );
+        let tail = collect_tail_lines(&files, 4);
+        assert_eq!(tail.len(), 4);
+        let ids: Vec<&str> = tail
+            .iter()
+            .map(|l| l.split("\"i\":").nth(1).unwrap_or("?"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["3}", "4}", "5}", "6}"],
+            "整体时间正序且凑满 4 条：{:?}",
+            ids
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
