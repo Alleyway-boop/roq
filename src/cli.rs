@@ -9,12 +9,17 @@ pub const DEFAULT_MAX_ROWS: usize = 500;
 /// 终端展示的默认单元格字符数上限（存档不截断）。
 pub const DEFAULT_MAX_CELL: usize = 200;
 
+#[derive(Debug)]
 pub struct Cli {
     pub profile: String,
     pub sql: Option<String>,
     pub max_rows: usize,
     pub max_cell: usize,
     pub format: OutputFormat,
+    /// 结果输出文件（--out）：替代终端输出与自动存档，审计 result 记此路径。
+    pub out: Option<PathBuf>,
+    /// 抑制 stderr 提示信息（--quiet）：错误与退出码不受影响，审计照写。
+    pub quiet: bool,
     pub list: bool,
     pub config: Option<PathBuf>,
 }
@@ -60,6 +65,8 @@ pub fn usage() -> String {
         "  --max-rows      最多输出行数（默认 500）".to_string(),
         "  --max-cell      单元格最大字符数（默认 200，超出截断；仅 tsv 终端显示生效，存档全量）".to_string(),
         "  --format        输出格式 tsv/json/csv（默认 tsv）。json 为单文档对象，csv 遵循 RFC 4180".to_string(),
+        "  --out           结果写入文件（纯数据，按 --format；替代终端输出与自动存档，审计记此路径）".to_string(),
+        "  --quiet, -q     抑制 stderr 提示信息（错误与退出码不受影响；审计照写）".to_string(),
         "  --config        配置文件或目录（目录=扫描其中 *.conf；默认 ~/.roq/profiles.conf + profiles.d/*.conf）".to_string(),
         "  --list          列出可用配置名".to_string(),
         String::new(),
@@ -193,6 +200,8 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         max_rows: DEFAULT_MAX_ROWS,
         max_cell: DEFAULT_MAX_CELL,
         format: OutputFormat::Tsv,
+        out: None,
+        quiet: false,
         list: false,
         config: None,
     };
@@ -240,6 +249,14 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
                 cli.format = OutputFormat::parse(&v)?;
                 i += 1;
             }
+            "--out" => {
+                let Some(v) = next() else {
+                    return Err("--out 缺少参数".into());
+                };
+                cli.out = Some(PathBuf::from(v));
+                i += 1;
+            }
+            "--quiet" | "-q" => cli.quiet = true,
             _ => sql_parts.push(arg.clone()),
         }
         i += 1;
@@ -248,4 +265,36 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         cli.sql = Some(sql_parts.join(" "));
     }
     Ok(cli)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_args_reads_out_quiet_and_sql_parts() {
+        let cli = parse_args(&[
+            "--out".to_string(),
+            "data.tsv".to_string(),
+            "--quiet".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+            "SELECT".to_string(),
+            "1".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(cli.out, Some(PathBuf::from("data.tsv")));
+        assert!(cli.quiet);
+        assert_eq!(cli.sql.as_deref(), Some("SELECT 1"), "SQL 片段应拼接");
+        assert_eq!(cli.format, OutputFormat::Json);
+        // 默认值不受影响
+        assert!(!parse_args(&["SELECT 1".to_string()]).unwrap().quiet);
+        assert_eq!(parse_args(&["SELECT 1".to_string()]).unwrap().out, None);
+    }
+
+    #[test]
+    fn parse_args_rejects_missing_out_value() {
+        let err = parse_args(&["--out".to_string()]).unwrap_err();
+        assert!(err.contains("--out"), "报错应指出 --out：{}", err);
+    }
 }

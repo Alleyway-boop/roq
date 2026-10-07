@@ -43,11 +43,17 @@ pub fn build_opts(profile: &Profile, password: &str) -> Opts {
 
 /// 执行一条已过闸门的查询。所有退出路径（含失败）都会写审计日志。
 pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
+    // --quiet 只抑制提示（prod 提醒/耗时统计等）；错误信息与退出码契约不受影响。
+    let notice = |msg: String| {
+        if !cli.quiet {
+            eprintln!("{}", msg);
+        }
+    };
     if cli.profile == "prod" {
-        eprintln!(
+        notice(format!(
             "[roq] 注意：正在查询生产库 {}（只读会话）",
             profile.database
-        );
+        ));
     }
     let start = Instant::now();
     // 统一的"记审计并退出"出口，保证失败路径无一漏记。
@@ -75,6 +81,19 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
             result_file,
         ));
         ExitCode::from(code)
+    };
+    // 输出目标：--out 写文件（不可写即用法错误，查询不执行）；否则终端 stdout。
+    let stdout = std::io::stdout();
+    let mut out: Box<dyn Write> = match &cli.out {
+        Some(path) => match std::fs::File::create(path) {
+            Ok(file) => Box::new(BufWriter::new(file)),
+            Err(e) => {
+                eprintln!("[roq] 无法创建输出文件 {}：{}", path.display(), e);
+                let reason = format!("create-out-file: {e}");
+                return log_exit("config-error", &reason, 0, false, "", 1);
+            }
+        },
+        None => Box::new(BufWriter::new(stdout.lock())),
     };
     // 密码在连接前解析：password_env 引用的变量未设置即中止（不回退明文）。
     let password = match profile.resolved_password() {
@@ -131,7 +150,7 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         "SET SESSION max_execution_time={}",
         MAX_EXECUTION_TIME_MS
     )) {
-        eprintln!("[roq] 警告：未能设置 max_execution_time（{}）", e);
+        notice(format!("[roq] 警告：未能设置 max_execution_time（{}）", e));
     }
     let mut result = match conn.query_iter(sql) {
         Ok(result) => result,
@@ -146,9 +165,14 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         .iter()
         .map(|col| col.name_str().to_string())
         .collect();
-    let stdout = std::io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
     // 存档恒为 TSV（lines 收集全量转义行，不截断）；json/csv 额外收集归一单元格，结束时整体渲染。
+    // --out 写文件不截断（--max-cell 仅终端显示限流）；--out 时审计 result 记该路径（替代自动存档）。
+    let display_max_cell = if cli.out.is_some() {
+        usize::MAX
+    } else {
+        cli.max_cell
+    };
+    let out_path = cli.out.as_ref().map(|p| p.display().to_string());
     let mut lines: Vec<String> = vec![columns.join("\t")];
     let mut raw_rows: Vec<Vec<CellValue>> = Vec::new();
     if cli.format == OutputFormat::Tsv {
@@ -163,9 +187,11 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
             Err(e) => {
                 let _ = out.flush();
                 eprintln!("[roq] 读取行失败：{}", e);
-                let partial =
-                    save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
-                        .unwrap_or_default();
+                let partial = match &out_path {
+                    Some(path) => path.clone(),
+                    None => save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
+                        .unwrap_or_default(),
+                };
                 return log_exit(
                     "exec-error",
                     &format!("read-row: {e}"),
@@ -190,7 +216,7 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
             OutputFormat::Tsv => {
                 let display: String = cells
                     .into_iter()
-                    .map(|cell| truncate_cell(tsv_cell(cell), cli.max_cell))
+                    .map(|cell| truncate_cell(tsv_cell(cell), display_max_cell))
                     .collect::<Vec<_>>()
                     .join("\t");
                 let _ = writeln!(out, "{}", display);
@@ -212,9 +238,13 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         OutputFormat::Tsv => {}
     }
     let _ = out.flush();
-    let result_file =
-        save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines).unwrap_or_default();
-    eprintln!(
+    // --out 替代自动存档（文件已是全量结果），审计 result 记该路径。
+    let result_file = match &out_path {
+        Some(path) => path.clone(),
+        None => save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
+            .unwrap_or_default(),
+    };
+    notice(format!(
         "[roq] profile={} db={} 行数={}{} 耗时={}ms（会话只读）存档={}",
         cli.profile,
         profile.database,
@@ -230,7 +260,7 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         } else {
             &result_file
         }
-    );
+    ));
     log_exit("ok", "", rows_out, truncated, &result_file, 0)
 }
 
