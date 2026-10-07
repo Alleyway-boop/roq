@@ -6,11 +6,18 @@
 ## 用法
 
 ```
-roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--config 路径] [--list] "单条只读SQL"
+roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--format tsv|json|csv]
+        [--out 文件] [--quiet] [--config 路径] [--list] "单条只读SQL"
 ```
 
 - 仅接受**单条**语句：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
-- 输出 TSV（制表符分隔）；NULL 显示为 `\N`；控制字符替换为空格
+- 输出格式（`--format`，默认 tsv）：
+  - **tsv**：制表符分隔；NULL 显示为 `\N`；`\t` `\n` `\r` 为转义序列
+  - **json**：单文档对象 `{"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool}`；NULL 为 `null`
+  - **csv**：RFC 4180；NULL 为空字段
+  - json/csv 是交换格式，**单元格不截断**（`--max-cell` 仅 tsv 终端显示生效）
+- `--out 文件`：结果写入文件（纯数据、按 `--format`、不截断），替代终端输出与自动存档，审计 `result` 记此路径
+- `--quiet`：抑制 stderr 提示（prod 提醒/耗时统计）；错误与退出码不受影响，审计照写
 - 退出码：`0` 成功；`1` 用法/配置错误；`2` 语句被闸门拒绝；`3` 连接/执行错误
 
 ## 连接配置
@@ -19,6 +26,7 @@ roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--config 路径] [--li
 
 ```
 roq config add <名> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径]
+roq config add <名> --host ... --password-env 环境变量名 ...   # 凭据不落明文，密码改从环境变量读
 roq config test <名>        # 连接 + 只读断言 + 版本探测
 roq config remove <名> --yes
 roq config list
@@ -40,7 +48,8 @@ roq config list
 host=数据库主机
 port=3306          ; 缺省 3306
 user=用户
-password=密码
+password=密码      ; 与 password_env 二选一（同节并存会报错）
+password_env=变量名 ; 可选，密码从该环境变量读，凭据不落明文；变量未设置时连接前报错（不回退明文）
 database=库名
 ssl=true           ; 可选，是否启用 TLS（部分云数据库端点不宣告 TLS，加了反而握手失败）
 ```
@@ -69,6 +78,11 @@ ssl=true           ; 可选，是否启用 TLS（部分云数据库端点不宣�
 - **审计日志**：`~\.roq\logs\roq-YYYYMM.jsonl`（按月，集中跨项目）
   每行一条 JSON：`ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`
   `outcome` 含 `ok`、`gate-rejected`（含拒绝原因）、`connect-error`、`exec-error`、`config-error`——被拒的尝试同样留痕
+  用 `roq log` 查询（默认今天）：
+
+  ```
+  roq log [--today | --month | --last N] [--profile 名] [--outcome ok|gate-rejected|...] [--json]
+  ```
 - **结果存档**：当前项目目录 `\.roq\results\YYYYMMDD\HHMMSS-毫秒-<表名>-<profile>.tsv`
   - 文件头为 `# ` 元信息块（时间 / 库 / 行数上限 / SQL），TSV 数据体从首个非 `#` 行开始
   - **单元格不截断**（全量保真；`--max-cell` 只影响终端显示）
@@ -87,6 +101,7 @@ cp target\release\roq.exe .\roq.exe
 
 - [ ] 多数据库驱动：PostgreSQL / SQLite（profile 增加 `driver=` 字段，闸门按方言适配）
 - [ ] 免配置直连：`--dsn "mysql://user:pass@host/db"` 一次性连接
-- [ ] 输出格式：`--format json` / `--format csv`
+- [x] 输出格式：`--format tsv|json|csv`（v0.5.0）
 - [ ] `--explain` 自动加 EXPLAIN 前缀查看执行计划
-- [ ] 结果落盘：`--out 文件` 避免大结果过终端
+- [x] 结果落盘：`--out 文件` 避免大结果过终端（v0.5.0）
+- [ ] 排查快捷子命令：`roq tables` / `roq schema <表>`
