@@ -12,7 +12,9 @@ use mysql::{Conn, Opts, OptsBuilder, SslOpts};
 use crate::audit::{append_audit_log, audit_line, json_escape, save_result};
 use crate::cli::Cli;
 use crate::config::Profile;
-use crate::render::{escape_cell, truncate_cell};
+use crate::render::{
+    raw_cell, render_csv, render_json, truncate_cell, tsv_cell, CellValue, OutputFormat,
+};
 
 /// 连接超时（秒）。
 const CONNECT_TIMEOUT_SECS: u64 = 8;
@@ -146,9 +148,12 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         .collect();
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
-    // 终端展示截断；lines 收集全量（不截断）供存档。
+    // 存档恒为 TSV（lines 收集全量转义行，不截断）；json/csv 额外收集归一单元格，结束时整体渲染。
     let mut lines: Vec<String> = vec![columns.join("\t")];
-    let _ = writeln!(out, "{}", columns.join("\t"));
+    let mut raw_rows: Vec<Vec<CellValue>> = Vec::new();
+    if cli.format == OutputFormat::Tsv {
+        let _ = writeln!(out, "{}", columns.join("\t"));
+    }
     let mut rows_out = 0usize;
     let mut truncated = false;
     while rows_out < cli.max_rows {
@@ -171,18 +176,40 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
                 );
             }
         };
-        let full: Vec<String> = row.unwrap().into_iter().map(escape_cell).collect();
-        let display: String = full
-            .iter()
-            .map(|cell| truncate_cell(cell.clone(), cli.max_cell))
-            .collect::<Vec<_>>()
-            .join("\t");
-        let _ = writeln!(out, "{}", display);
-        lines.push(full.join("\t"));
+        let cells: Vec<CellValue> = row.unwrap().into_iter().map(raw_cell).collect();
+        lines.push(
+            cells
+                .iter()
+                .cloned()
+                .map(tsv_cell)
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+        match cli.format {
+            // TSV 流式逐行写终端；--max-cell 仅此格式生效（json/csv 是交换格式，截断即造假数据）。
+            OutputFormat::Tsv => {
+                let display: String = cells
+                    .into_iter()
+                    .map(|cell| truncate_cell(tsv_cell(cell), cli.max_cell))
+                    .collect::<Vec<_>>()
+                    .join("\t");
+                let _ = writeln!(out, "{}", display);
+            }
+            OutputFormat::Json | OutputFormat::Csv => raw_rows.push(cells),
+        }
         rows_out += 1;
     }
     if result.next().is_some() {
         truncated = true;
+    }
+    match cli.format {
+        OutputFormat::Json => {
+            let _ = writeln!(out, "{}", render_json(&columns, &raw_rows, truncated));
+        }
+        OutputFormat::Csv => {
+            let _ = writeln!(out, "{}", render_csv(&columns, &raw_rows));
+        }
+        OutputFormat::Tsv => {}
     }
     let _ = out.flush();
     let result_file =

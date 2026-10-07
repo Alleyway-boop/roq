@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::render::OutputFormat;
+
 /// 默认最多输出行数（终端与存档共用上限）。
 pub const DEFAULT_MAX_ROWS: usize = 500;
 /// 终端展示的默认单元格字符数上限（存档不截断）。
@@ -12,6 +14,7 @@ pub struct Cli {
     pub sql: Option<String>,
     pub max_rows: usize,
     pub max_cell: usize,
+    pub format: OutputFormat,
     pub list: bool,
     pub config: Option<PathBuf>,
 }
@@ -55,12 +58,13 @@ pub fn usage() -> String {
         String::new(),
         "  --profile, -p   连接配置名（默认 dev；生产库请显式 --profile prod）".to_string(),
         "  --max-rows      最多输出行数（默认 500）".to_string(),
-        "  --max-cell      单元格最大字符数（默认 200，超出截断；仅影响终端，存档全量）".to_string(),
+        "  --max-cell      单元格最大字符数（默认 200，超出截断；仅 tsv 终端显示生效，存档全量）".to_string(),
+        "  --format        输出格式 tsv/json/csv（默认 tsv）。json 为单文档对象，csv 遵循 RFC 4180".to_string(),
         "  --config        配置文件或目录（目录=扫描其中 *.conf；默认 ~/.roq/profiles.conf + profiles.d/*.conf）".to_string(),
         "  --list          列出可用配置名".to_string(),
         String::new(),
         "仅接受单条只读语句：SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES".to_string(),
-        "输出为 TSV（制表符分隔）；NULL 显示为 \\N；\\t \\n \\r 为转义序列。".to_string(),
+        "tsv：NULL 显示为 \\N，\\t \\n \\r 为转义序列；json：NULL 为 null（单元格不截断）；csv：NULL 为空字段。".to_string(),
     ]
     .join("\n")
 }
@@ -188,6 +192,7 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
         sql: None,
         max_rows: DEFAULT_MAX_ROWS,
         max_cell: DEFAULT_MAX_CELL,
+        format: OutputFormat::Tsv,
         list: false,
         config: None,
     };
@@ -226,6 +231,13 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
                     return Err("--max-cell 缺少参数".into());
                 };
                 cli.max_cell = v.parse().map_err(|_| "--max-cell 需要正整数")?;
+                i += 1;
+            }
+            "--format" => {
+                let Some(v) = next() else {
+                    return Err("--format 缺少参数".into());
+                };
+                cli.format = OutputFormat::parse(&v)?;
                 i += 1;
             }
             _ => sql_parts.push(arg.clone()),
