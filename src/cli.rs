@@ -332,11 +332,15 @@ pub fn parse_args(args: &[String]) -> Result<Cli, String> {
             }
             "--quiet" | "-q" => cli.quiet = true,
             _ => {
-                // 未知 flag（"-" 开头且第二字符为字母）直接报用法错误，
+                // 未知 flag（"-" 开头、跳过连字符后首字符为字母）直接报用法错误，
                 // 不再静默拼进 SQL 以莫名其妙的闸门拒绝收场；
                 // "-3"、"-" 等非 flag 形态仍视作 SQL 片段（负数字面量）。
                 let looks_like_flag = arg.starts_with('-')
-                    && arg.chars().nth(1).is_some_and(|c| c.is_ascii_alphabetic());
+                    && arg
+                        .trim_start_matches('-')
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic());
                 if looks_like_flag {
                     return Err(format!("无法识别的参数：{}（--help 查看用法）", arg));
                 }
