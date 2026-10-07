@@ -8,8 +8,12 @@
 ```
 roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--format tsv|json|csv]
         [--out 文件] [--quiet] [--config 路径] [--list] "单条只读SQL"
+roq tables [--profile 名称 ...]               # 快捷：SHOW TABLES
+roq schema <表|库.表> [--profile 名称 ...]    # 快捷：SHOW CREATE TABLE（表名严格校验，反引号包裹）
+roq explain "SQL语句" [--profile 名称 ...]    # 快捷：自动加 EXPLAIN 前缀
 ```
 
+- 快捷子命令只生成 SQL，**与手写查询走同一条闸门+审计+存档链路**；同样支持 `--profile/--format/--out/--quiet` 等查询 flag
 - 仅接受**单条**语句：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
 - 输出格式（`--format`，默认 tsv）：
   - **tsv**：制表符分隔；NULL 显示为 `\N`；`\t` `\n` `\r` 为转义序列
@@ -18,6 +22,7 @@ roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--format tsv|json|csv]
   - json/csv 是交换格式，**单元格不截断**（`--max-cell` 仅 tsv 终端显示生效）
 - `--out 文件`：结果写入文件（纯数据、按 `--format`、不截断），替代终端输出与自动存档，审计 `result` 记此路径
 - `--quiet`：抑制 stderr 提示（prod 提醒/耗时统计）；错误与退出码不受影响，审计照写
+- 未知 flag 直接报用法错误（不会静默拼进 SQL）
 - 退出码：`0` 成功；`1` 用法/配置错误；`2` 语句被闸门拒绝；`3` 连接/执行错误
 
 ## 连接配置
@@ -82,6 +87,7 @@ ssl=true           ; 可选，是否启用 TLS（部分云数据库端点不宣�
 
   ```
   roq log [--today | --month | --last N] [--profile 名] [--outcome ok|gate-rejected|...] [--json]
+  # --last N 为最近 N 条，跨月扫描全部日志文件；--today（默认）/--month 只看当月
   ```
 - **结果存档**：当前项目目录 `\.roq\results\YYYYMMDD\HHMMSS-毫秒-<表名>-<profile>.tsv`
   - 文件头为 `# ` 元信息块（时间 / 库 / 行数上限 / SQL），TSV 数据体从首个非 `#` 行开始
@@ -102,6 +108,6 @@ cp target\release\roq.exe .\roq.exe
 - [ ] 多数据库驱动：PostgreSQL / SQLite（profile 增加 `driver=` 字段，闸门按方言适配）
 - [ ] 免配置直连：`--dsn "mysql://user:pass@host/db"` 一次性连接
 - [x] 输出格式：`--format tsv|json|csv`（v0.5.0）
-- [ ] `--explain` 自动加 EXPLAIN 前缀查看执行计划
+- [x] `--explain` 自动加 EXPLAIN 前缀查看执行计划（v0.6.0，子命令形态 `roq explain`）
 - [x] 结果落盘：`--out 文件` 避免大结果过终端（v0.5.0）
-- [ ] 排查快捷子命令：`roq tables` / `roq schema <表>`
+- [x] 排查快捷子命令：`roq tables` / `roq schema <表>`（v0.6.0）
