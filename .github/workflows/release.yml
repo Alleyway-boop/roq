@@ -1,0 +1,51 @@
+# tag 推送（v*）触发：三平台构建 release 二进制，打包二进制 + skill 挂 GitHub Releases。
+# 本地发版流程见 CLAUDE.md：改 Cargo.toml 版本 → git tag vX.Y.Z → git push --tags。
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package (binary + skill)
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          DIR="roq-${VERSION}-${{ matrix.target }}"
+          mkdir -p "${DIR}/skill/roq"
+          if [ -f "target/${{ matrix.target }}/release/roq.exe" ]; then
+            cp "target/${{ matrix.target }}/release/roq.exe" "${DIR}/roq.exe"
+          else
+            cp "target/${{ matrix.target }}/release/roq" "${DIR}/roq"
+          fi
+          cp skill/roq/SKILL.md "${DIR}/skill/roq/SKILL.md"
+          tar czf "${DIR}.tar.gz" "${DIR}"
+      - name: Upload to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: roq-*.tar.gz
