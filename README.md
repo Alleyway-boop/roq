@@ -11,6 +11,7 @@ roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--format tsv|json|csv]
 roq tables [--profile 名称 ...]               # 快捷：SHOW TABLES
 roq schema <表|库.表> [--profile 名称 ...]    # 快捷：SHOW CREATE TABLE（表名严格校验，反引号包裹）
 roq explain "SQL语句" [--profile 名称 ...]    # 快捷：自动加 EXPLAIN 前缀
+roq skill install [--global | --project] [--force]  # 安装 AI 使用技能（SKILL.md）到 Claude Code
 ```
 
 - 快捷子命令只生成 SQL，**与手写查询走同一条闸门+审计+存档链路**；同样支持 `--profile/--format/--out/--quiet` 等查询 flag
@@ -95,6 +96,22 @@ ssl=true           ; 可选，是否启用 TLS（部分云数据库端点不宣�
   - 文件名自动带表名（取 FROM/JOIN 后首个表标识符），不打开文件也能认出查了哪张表
   - 在家目录等非项目位置运行时退回 `~\.roq\results\`；项目里 gitignore 加一行 `.roq/` 即可忽略
 
+## 安装
+
+任选其一：
+
+1. **下载 Release**（推荐，免 Rust 工具链）：[GitHub Releases](https://github.com/Alleyway-boop/roq/releases) 下载对应平台压缩包（windows-x64 / macos-arm64 / macos-x64 / linux-x64），解压即得 `roq` 二进制与 `skill/` 目录
+2. **cargo 安装**：`cargo install --git https://github.com/Alleyway-boop/roq`
+3. **源码编译**：见下节
+
+装好后把二进制所在目录加入 PATH，然后安装 AI 使用技能（供 Claude Code 在任意项目直接正确使用 roq）：
+
+```
+roq skill install --global    # 写入 ~/.claude/skills/roq/（跨项目生效）
+```
+
+skill 内容随二进制打包、版本永远一致；升级 roq 后重跑一次 `install --force` 即可同步。
+
 ## 编译
 
 ```
@@ -111,3 +128,4 @@ cp target\release\roq.exe .\roq.exe
 - [x] `--explain` 自动加 EXPLAIN 前缀查看执行计划（v0.6.0，子命令形态 `roq explain`）
 - [x] 结果落盘：`--out 文件` 避免大结果过终端（v0.5.0）
 - [x] 排查快捷子命令：`roq tables` / `roq schema <表>`（v0.6.0）
+- [x] 分发：tag 触发 CI 三平台 Release；`roq skill install` 随二进制分发 AI 使用技能（v0.7.0）
