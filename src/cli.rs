@@ -25,13 +25,29 @@ pub struct Cli {
 }
 
 /// 顶层命令：查询（默认）或 config 子命令。
+#[derive(Debug)]
 pub enum Command {
     Query(Cli),
     Config(ConfigCmd),
     Log(LogArgs),
+    Skill(SkillCmd),
+}
+
+/// `roq skill` 子命令：安装随二进制打包的 AI 使用技能（SKILL.md）。
+#[derive(Debug)]
+pub enum SkillCmd {
+    Install {
+        /// 装到 ~/.claude/skills/roq/（默认，跨项目生效）。
+        global: bool,
+        /// 装到当前项目 .claude/skills/roq/（仅本项目生效）。
+        project: bool,
+        /// 目标已存在且内容不同时仍覆盖。
+        force: bool,
+    },
 }
 
 /// `roq log` 子命令参数（默认范围=今天）。
+#[derive(Debug)]
 pub struct LogArgs {
     pub month: bool,
     pub last: Option<usize>,
@@ -41,6 +57,7 @@ pub struct LogArgs {
 }
 
 /// `roq config` 子命令集。
+#[derive(Debug)]
 pub enum ConfigCmd {
     Add {
         name: String,
@@ -72,6 +89,7 @@ pub fn usage() -> String {
         "      roq tables [--profile 名 ...]              # SHOW TABLES 快捷方式".to_string(),
         "      roq schema <表|库.表> [--profile 名 ...]   # SHOW CREATE TABLE 快捷方式".to_string(),
         "      roq explain \"SQL语句\" [--profile 名 ...]  # 自动加 EXPLAIN 前缀".to_string(),
+        "      roq skill install [--global | --project] [--force]  # 安装 AI 使用技能".to_string(),
         "      roq --help".to_string(),
         String::new(),
         "  --profile, -p   连接配置名（默认 dev；生产库请显式 --profile prod）".to_string(),
@@ -95,6 +113,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
         Some("config") => Ok(Command::Config(parse_config_cmd(&args[1..])?)),
         Some("log") => Ok(Command::Log(parse_log_cmd(&args[1..])?)),
+        Some("skill") => Ok(Command::Skill(parse_skill_cmd(&args[1..])?)),
         Some("tables") => shortcut_tables(&args[1..]),
         Some("schema") => shortcut_schema(&args[1..]),
         Some("explain") => shortcut_explain(&args[1..]),
@@ -320,6 +339,51 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
         _ => Err(config_usage()),
     }
 }
+
+fn skill_usage() -> String {
+    [
+        "roq skill —— AI 使用技能（SKILL.md）分发".to_string(),
+        String::new(),
+        "用法:".to_string(),
+        "  roq skill install [--global | --project] [--force]".to_string(),
+        String::new(),
+        "  --global    装到 ~/.claude/skills/roq/（默认，全部项目可用）".to_string(),
+        "  --project   装到当前项目 .claude/skills/roq/（仅本项目可用）".to_string(),
+        "  --force     目标已存在且内容不同时仍覆盖（内容相同则无需此 flag）".to_string(),
+        String::new(),
+        "skill 内容随二进制打包，版本永远与 roq 一致；更新 roq 后重跑 install 即可同步。".to_string(),
+    ]
+    .join("\n")
+}
+
+fn parse_skill_cmd(args: &[String]) -> Result<SkillCmd, String> {
+    let mut global = false;
+    let mut project = false;
+    let mut force = false;
+    let mut action: Option<&str> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Err(skill_usage()),
+            "install" if action.is_none() => action = Some("install"),
+            "--global" => global = true,
+            "--project" => project = true,
+            "--force" => force = true,
+            other => return Err(format!("无法识别的参数：{}", other)),
+        }
+    }
+    if action.is_none() {
+        return Err(skill_usage());
+    }
+    if global && project {
+        return Err("--global 与 --project 二选一".to_string());
+    }
+    // 缺省 --global：两 flag 都没给时视为全局安装
+    Ok(SkillCmd::Install {
+        global: !project,
+        project,
+        force,
+    })
+}
 /// 解析查询命令行参数。--help/--version 以 Err 返回完整文本（调用方直接打印后正常退出）。
 pub fn parse_args(args: &[String]) -> Result<Cli, String> {
     let (mut cli, sql_parts) = parse_query_parts(args)?;
@@ -511,5 +575,45 @@ mod tests {
         assert!(parse_command(&["schema".to_string()]).is_err());
         assert!(parse_command(&["schema".to_string(), "bad name".to_string()]).is_err());
         assert!(parse_command(&["explain".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_skill_install_defaults_to_global() {
+        let Command::Skill(SkillCmd::Install { global, project, force }) =
+            parse_command(&["skill".to_string(), "install".to_string()]).unwrap()
+        else {
+            panic!("skill install 应产出 Skill 命令");
+        };
+        assert!(global, "缺省应为全局安装");
+        assert!(!project);
+        assert!(!force);
+    }
+
+    #[test]
+    fn parse_skill_install_flags_and_rejections() {
+        let Command::Skill(SkillCmd::Install { global, project, force }) = parse_command(&[
+            "skill".to_string(),
+            "install".to_string(),
+            "--project".to_string(),
+            "--force".to_string(),
+        ])
+        .unwrap() else {
+            panic!("应产出 Skill 命令");
+        };
+        assert!(!global, "--project 应关闭全局");
+        assert!(project && force);
+        let err = parse_command(&[
+            "skill".to_string(),
+            "install".to_string(),
+            "--global".to_string(),
+            "--project".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("二选一"), "应拒绝互斥 flag：{}", err);
+        let err = parse_command(&["skill".to_string(), "install".to_string(), "--foo".to_string()])
+            .unwrap_err();
+        assert!(err.contains("--foo"), "未知 flag 应报错：{}", err);
+        let err = parse_command(&["skill".to_string()]).unwrap_err();
+        assert!(err.contains("roq skill"), "缺动作应回用法：{}", err);
     }
 }
