@@ -218,13 +218,25 @@ pub fn load_config_sources(config: Option<&PathBuf>) -> Result<HashMap<String, P
 }
 
 /// 打印 profile 清单（--list 与 config list 共用）。
-pub fn print_profiles(profiles: &HashMap<String, Profile>) {
+/// --list/config list 的统一文本：每行 profile → host:port  db=库名  <- 来源文件。
+/// 库名直接可见，配置名与实连库不符（如 test 连到 xxx_dev）一眼可辨。
+pub fn format_profiles(profiles: &HashMap<String, Profile>) -> String {
     let mut entries: Vec<(&String, &Profile)> = profiles.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
-    println!("可用配置（{}）：", entries.len());
-    for (name, profile) in entries {
-        println!("  {:<12} <- {}", name, profile.source);
-    }
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|(name, profile)| {
+            format!(
+                "  {:<12} {}:{}  db={}  <- {}",
+                name, profile.host, profile.port, profile.database, profile.source
+            )
+        })
+        .collect();
+    format!("可用配置（{}）：\n{}", entries.len(), lines.join("\n"))
+}
+
+pub fn print_profiles(profiles: &HashMap<String, Profile>) {
+    println!("{}", format_profiles(profiles));
 }
 
 #[cfg(test)]
@@ -237,6 +249,27 @@ mod tests {
             std::env::temp_dir().join(format!("roq-test-{}-{}.conf", tag, std::process::id()));
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn format_profiles_lists_host_db_and_source_per_line() {
+        let path = write_temp(
+            "listfmt",
+            "[dev]\nhost=h1\nport=3307\nuser=u\npassword=p\ndatabase=db_a\n",
+        );
+        let profiles = load_profiles(&path).unwrap();
+        let out = format_profiles(&profiles);
+        assert!(out.contains("可用配置（1）"), "首行应计数：{}", out);
+        let line = out.lines().nth(1).expect("应有 profile 行");
+        assert!(line.contains("dev"), "应含配置名：{}", line);
+        assert!(line.contains("h1:3307"), "应含 host:port：{}", line);
+        assert!(line.contains("db=db_a"), "应含库名：{}", line);
+        assert!(
+            line.contains(&path.display().to_string()),
+            "应含来源文件：{}",
+            line
+        );
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
