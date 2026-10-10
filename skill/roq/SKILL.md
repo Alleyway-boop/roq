@@ -27,13 +27,14 @@ roq [--profile 名] [--format tsv|json|csv] [--max-rows N] "单条只读SQL"
   roq tables / roq schema <表|库.表> / roq explain "SQL" / roq log [--last N] ...
 ```
 
-- **AI 消费数据默认 `--format json --quiet`**：stdout 是单文档 `{"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool}`（NULL→null，单元格不截断），stderr 干净；给人看才用 tsv
+- **AI 消费数据默认 `--format json --quiet`**：stdout 是单文档 `{"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool,"elapsedMs":N}`（NULL→null，单元格不截断），stderr 干净；给人看才用 tsv
 - 排查起点用快捷命令：`roq tables`（看有哪些表）→ `roq schema t_xxx`（看结构）→ 再写查询；`roq explain "..."` 看执行计划
+- 两库对账用 `roq diff --profile 左 --profile 右 "SQL"`（比对列名/行数/行多重集摘要；`--json` 出机器可读结论；exit=4 表示不一致）
 - 大结果 `--out 文件`（替代终端输出与自动存档）；查审计用 `roq log --last 20` / `--outcome gate-rejected`
 - 仅接受单条：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
 - tsv 格式：首行列名；`NULL` 显示为 `\N`；`\t \n \r` 转义为可见序列（保真且单行）
 - 默认限额 500 行（`--max-rows`）；tsv 终端单格 200 字符（`--max-cell`；json/csv 与存档不截断）
-- 退出码：`0` 成功 / `1` 用法配置错 / `2` 闸门拒绝 / `3` 连接执行错
+- 退出码：`0` 成功 / `1` 用法配置错 / `2` 闸门拒绝 / `3` 连接执行错 / `4` diff 不一致
 
 stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"、结果存档路径；`--quiet` 会抑制，人看场景保留它向用户报告）。
 
@@ -92,6 +93,9 @@ roq --profile dev --out big.tsv "SELECT * FROM t_question LIMIT 10000"
 
 # 查审计（谁查了什么/被闸门拒了什么）
 roq log --last 20 --outcome gate-rejected
+
+# 两库对账（快照库 vs 开发库漂移、修复前后验证；exit=4 表示不一致）
+roq diff --profile dev --profile prod-copy "SELECT COUNT(*) AS cnt FROM t_question" --json
 ```
 
 json 输出截断信息看顶层 `"truncated"`；长文本字段先 `LEFT(col, N)` 截断再查，避免整段 HTML 灌爆上下文。

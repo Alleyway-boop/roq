@@ -28,11 +28,11 @@
 | `query.rs` | 连接 + 会话只读断言 + 执行 |
 | `render.rs` | tsv/json/csv 渲染与行数、单元格限额 |
 | `audit.rs` | 审计日志（月度 jsonl）与结果存档 |
-| `cmd_config.rs` / `cmd_log.rs` / `cmd_skill.rs` | config / log / skill 子命令 |
+| `cmd_config.rs` / `cmd_log.rs` / `cmd_skill.rs` / `cmd_diff.rs` | config / log / skill / diff 子命令 |
 | `skill/roq/SKILL.md` | AI 使用技能规范源，随二进制分发（`roq skill install`） |
 
 ## 约定
 
 - 新子命令遵循 `cmd_*.rs` 模式：解析在 `cli.rs`、执行在 `cmd_*.rs`、`Result<String, String>` 统一出口打印
-- 退出码：0 成功 / 1 用法配置错 / 2 闸门拒绝 / 3 连接执行错
+- 退出码：0 成功 / 1 用法配置错 / 2 闸门拒绝 / 3 连接执行错 / 4 diff 比对不一致
 - 防覆盖类写操作（config add、skill install）一律拒绝静默覆盖，回读校验

@@ -1,6 +1,6 @@
 [package]
 name = "roq"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 authors = ["yuanfang"]
 description = "Read-only MySQL query CLI — 三层强制只读的数据库安全查询工具"

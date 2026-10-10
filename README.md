@@ -12,19 +12,22 @@ roq tables [--profile 名称 ...]               # 快捷：SHOW TABLES
 roq schema <表|库.表> [--profile 名称 ...]    # 快捷：SHOW CREATE TABLE（表名严格校验，反引号包裹）
 roq explain "SQL语句" [--profile 名称 ...]    # 快捷：自动加 EXPLAIN 前缀
 roq skill install [--global | --project | --codex] [--force]  # 安装 AI 使用技能（SKILL.md）到 Claude Code / Codex
+roq diff --profile 左 --profile 右 "SQL" [--json] [--max-rows N]  # 同一条 SQL 两库对账比对
 ```
 
 - 快捷子命令只生成 SQL，**与手写查询走同一条闸门+审计+存档链路**；同样支持 `--profile/--format/--out/--quiet` 等查询 flag
 - 仅接受**单条**语句：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
 - 输出格式（`--format`，默认 tsv）：
   - **tsv**：制表符分隔；NULL 显示为 `\N`；`\t` `\n` `\r` 为转义序列
-  - **json**：单文档对象 `{"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool}`；NULL 为 `null`
+  - **json**：单文档对象 `{"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool,"elapsedMs":N}`；NULL 为 `null`
   - **csv**：RFC 4180；NULL 为空字段
   - json/csv 是交换格式，**单元格不截断**（`--max-cell` 仅 tsv 终端显示生效）
 - `--out 文件`：结果写入文件（纯数据、按 `--format`、不截断），替代终端输出与自动存档，审计 `result` 记此路径
 - `--quiet`：抑制 stderr 提示（prod 提醒/耗时统计）；错误与退出码不受影响，审计照写
 - 未知 flag 直接报用法错误（不会静默拼进 SQL）
-- 退出码：`0` 成功；`1` 用法/配置错误；`2` 语句被闸门拒绝；`3` 连接/执行错误
+- 退出码：`0` 成功；`1` 用法/配置错误；`2` 语句被闸门拒绝；`3` 连接/执行错误；`4` diff 比对不一致
+- **diff 对账**：同一条 SQL 在两个 profile 各跑一遍，比对列名（有序）、行数、行多重集摘要（顺序无关、重复敏感）；
+  恰好两个 `--profile` 必须显式给出（防对错库）；任一侧截断时摘要仅覆盖已取前缀并标注；两侧各写一条审计
 
 ## 连接配置
 
@@ -47,7 +50,7 @@ roq config list
 - `~/.roq/profiles.d/*.conf` —— **目录扫描，一项目一文件**（如 `project-a.conf`、`project-b.conf`）
 
 `--config 路径` 可显式指定**文件或目录**（目录则扫描其中 `*.conf`，按文件名排序加载）。
-不同文件里同名 `[节]` 直接报错（拒绝静默遮蔽），`--list` 会显示每个配置来自哪个文件。
+不同文件里同名 `[节]` 直接报错（拒绝静默遮蔽），`--list` 会显示每个配置的 host:port、库名与来源文件（配置名与实连库不符一眼可辨）。
 
 ```ini
 [名称]
@@ -130,3 +133,4 @@ cp target\release\roq.exe .\roq.exe
 - [x] 结果落盘：`--out 文件` 避免大结果过终端（v0.5.0）
 - [x] 排查快捷子命令：`roq tables` / `roq schema <表>`（v0.6.0）
 - [x] 分发：tag 触发 CI 三平台 Release；`roq skill install` 随二进制分发 AI 使用技能（v0.7.0）
+- [x] 对账：`roq diff` 同 SQL 双 profile 比对；`--list` 显示库名；json 带耗时（v0.8.0，源自使用者反馈）
