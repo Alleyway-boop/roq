@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use roq::audit::{append_audit_log, audit_line, json_escape};
 use roq::cli::{parse_command, Cli, Command};
 use roq::cmd_config;
+use roq::cmd_diff;
 use roq::cmd_log;
 use roq::cmd_skill;
 use roq::config::{load_config_sources, print_profiles};
@@ -35,6 +36,7 @@ fn run() -> ExitCode {
         Command::Config(config_cmd) => cmd_config::run(config_cmd),
         Command::Log(log_args) => cmd_log::run(log_args),
         Command::Skill(skill_cmd) => cmd_skill::run(skill_cmd),
+        Command::Diff(diff_args) => cmd_diff::run(diff_args),
         Command::Query(cli) => run_query(cli),
     }
 }

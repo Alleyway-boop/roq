@@ -31,6 +31,19 @@ pub enum Command {
     Config(ConfigCmd),
     Log(LogArgs),
     Skill(SkillCmd),
+    Diff(DiffArgs),
+}
+
+/// `roq diff` 子命令参数：同一条 SQL 在两个 profile 上比对。
+#[derive(Debug)]
+pub struct DiffArgs {
+    /// 恰好两个：左/右参与比对的配置名。
+    pub profiles: Vec<String>,
+    pub sql: Option<String>,
+    /// 每侧比对行数上限（任一侧截断时行摘要仅覆盖已取前缀）。
+    pub max_rows: usize,
+    /// 机器可读输出（人类可读为默认表格）。
+    pub json: bool,
 }
 
 /// skill 安装目标：解析层保证三选一（缺省 Claude 全局），类型上杜绝非法组合。
@@ -99,6 +112,7 @@ pub fn usage() -> String {
         "      roq schema <表|库.表> [--profile 名 ...]   # SHOW CREATE TABLE 快捷方式".to_string(),
         "      roq explain \"SQL语句\" [--profile 名 ...]  # 自动加 EXPLAIN 前缀".to_string(),
         "      roq skill install [--global | --project | --codex] [--force]  # 安装 AI 使用技能".to_string(),
+        "      roq diff --profile 左 --profile 右 \"SQL\" [--json]   # 同一条 SQL 两库对账比对".to_string(),
         "      roq --help".to_string(),
         String::new(),
         "  --profile, -p   连接配置名（默认 dev；生产库请显式 --profile prod）".to_string(),
@@ -123,6 +137,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         Some("config") => Ok(Command::Config(parse_config_cmd(&args[1..])?)),
         Some("log") => Ok(Command::Log(parse_log_cmd(&args[1..])?)),
         Some("skill") => Ok(Command::Skill(parse_skill_cmd(&args[1..])?)),
+        Some("diff") => Ok(Command::Diff(parse_diff_cmd(&args[1..])?)),
         Some("tables") => shortcut_tables(&args[1..]),
         Some("schema") => shortcut_schema(&args[1..]),
         Some("explain") => shortcut_explain(&args[1..]),
@@ -474,13 +489,7 @@ fn parse_query_parts(args: &[String]) -> Result<(Cli, Vec<String>), String> {
                 // 未知 flag（"-" 开头、跳过连字符后首字符为字母）直接报用法错误，
                 // 不再静默拼进 SQL 以莫名其妙的闸门拒绝收场；
                 // "-3"、"-" 等非 flag 形态仍视作 SQL 片段（负数字面量）。
-                let looks_like_flag = arg.starts_with('-')
-                    && arg
-                        .trim_start_matches('-')
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_alphabetic());
-                if looks_like_flag {
+                if looks_like_flag(arg) {
                     return Err(format!("无法识别的参数：{}（--help 查看用法）", arg));
                 }
                 sql_parts.push(arg.clone());
@@ -489,6 +498,91 @@ fn parse_query_parts(args: &[String]) -> Result<(Cli, Vec<String>), String> {
         i += 1;
     }
     Ok((cli, sql_parts))
+}
+
+/// "形如 flag" 判定："-" 开头且跳过全部前导连字符后首字符为字母（--foo / -x）；
+/// "-3"、"-" 等非 flag 形态不算，仍可作为 SQL 片段（负数字面量）。
+fn looks_like_flag(arg: &str) -> bool {
+    arg.starts_with('-')
+        && arg
+            .trim_start_matches('-')
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+fn diff_usage() -> String {
+    [
+        "roq diff —— 同一条 SQL 在两个 profile 上执行并比对（两库对账）".to_string(),
+        String::new(),
+        "用法:".to_string(),
+        "  roq diff --profile 左 --profile 右 \"SQL\" [--json] [--max-rows N]".to_string(),
+        String::new(),
+        "  --profile ×2  参与比对的两个配置（必须显式给两个，不设默认，防对错库）".to_string(),
+        "  --json        机器可读输出：{\"left\":{...},\"right\":{...},\"equal\":bool}".to_string(),
+        "  --max-rows    每侧比对行数上限（默认 500；任一侧截断时行摘要仅覆盖已取前缀）".to_string(),
+        String::new(),
+        "比对维度：列名（有序）、行数、行多重集摘要（顺序无关、重复敏感）。".to_string(),
+        "退出码：0 一致 / 4 不一致；其余同查询（1 用法配置 / 2 闸门 / 3 连接执行）。".to_string(),
+        "两侧各写一条审计日志（与手写查询同一底账）。".to_string(),
+    ]
+    .join("\n")
+}
+
+/// `roq diff` 解析：恰好两个 --profile，剩余位置参数拼为 SQL。
+fn parse_diff_cmd(args: &[String]) -> Result<DiffArgs, String> {
+    let mut profiles: Vec<String> = Vec::new();
+    let mut max_rows = DEFAULT_MAX_ROWS;
+    let mut json = false;
+    let mut sql_parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let next = || args.get(i + 1).cloned();
+        match arg.as_str() {
+            "--help" | "-h" => return Err(diff_usage()),
+            "--profile" | "-p" => {
+                let Some(v) = next() else {
+                    return Err("--profile 缺少参数".into());
+                };
+                if profiles.len() >= 2 {
+                    return Err("diff 只接受两个 --profile（左/右各一）".into());
+                }
+                profiles.push(v);
+                i += 1;
+            }
+            "--max-rows" => {
+                let Some(v) = next() else {
+                    return Err("--max-rows 缺少参数".into());
+                };
+                max_rows = v.parse().map_err(|_| "--max-rows 需要正整数")?;
+                i += 1;
+            }
+            "--json" => json = true,
+            other => {
+                if looks_like_flag(other) {
+                    return Err(format!("无法识别的参数：{}（--help 查看用法）", other));
+                }
+                sql_parts.push(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    if profiles.is_empty() {
+        return Err(diff_usage());
+    }
+    if profiles.len() != 2 {
+        return Err("diff 需要恰好两个 --profile（左/右各一），不设默认防对错库".to_string());
+    }
+    if sql_parts.is_empty() {
+        return Err("diff 需要 SQL 语句".to_string());
+    }
+    Ok(DiffArgs {
+        profiles,
+        sql: Some(sql_parts.join(" ")),
+        max_rows,
+        json,
+    })
 }
 
 #[cfg(test)]
@@ -641,5 +735,76 @@ mod tests {
         assert!(err.contains("--foo"), "未知 flag 应报错：{}", err);
         let err = parse_command(&["skill".to_string()]).unwrap_err();
         assert!(err.contains("roq skill"), "缺动作应回用法：{}", err);
+    }
+
+    #[test]
+    fn parse_diff_takes_exactly_two_profiles_and_sql_parts() {
+        let Command::Diff(args) = parse_command(&[
+            "diff".to_string(),
+            "--profile".to_string(),
+            "dev".to_string(),
+            "--profile".to_string(),
+            "prod-copy".to_string(),
+            "SELECT".to_string(),
+            "1".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap() else {
+            panic!("diff 应产出 Diff 命令");
+        };
+        assert_eq!(args.profiles, vec!["dev", "prod-copy"]);
+        assert_eq!(args.sql.as_deref(), Some("SELECT 1"));
+        assert!(args.json);
+        assert_eq!(args.max_rows, DEFAULT_MAX_ROWS);
+    }
+
+    #[test]
+    fn parse_diff_rejects_wrong_profile_count_and_missing_sql() {
+        // 缺动作回用法
+        assert!(parse_command(&["diff".to_string()]).is_err());
+        // 只给一个 --profile
+        let err = parse_command(&[
+            "diff".to_string(),
+            "--profile".to_string(),
+            "dev".to_string(),
+            "SELECT 1".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("两个"), "单 profile 应报错：{}", err);
+        // 三个 --profile
+        let err = parse_command(&[
+            "diff".to_string(),
+            "--profile".to_string(),
+            "a".to_string(),
+            "--profile".to_string(),
+            "b".to_string(),
+            "--profile".to_string(),
+            "c".to_string(),
+            "SELECT 1".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("两个"), "三 profile 应报错：{}", err);
+        // 缺 SQL
+        let err = parse_command(&[
+            "diff".to_string(),
+            "--profile".to_string(),
+            "a".to_string(),
+            "--profile".to_string(),
+            "b".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("SQL"), "缺 SQL 应报错：{}", err);
+        // 未知 flag
+        let err = parse_command(&[
+            "diff".to_string(),
+            "--profile".to_string(),
+            "a".to_string(),
+            "--profile".to_string(),
+            "b".to_string(),
+            "--foo".to_string(),
+            "SELECT 1".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("--foo"), "未知 flag 应报错：{}", err);
     }
 }

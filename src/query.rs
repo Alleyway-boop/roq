@@ -43,6 +43,46 @@ pub fn build_opts(profile: &Profile, password: &str) -> Opts {
     Opts::from(builder)
 }
 
+/// 建连 + 第二层只读防护：会话只读 SET、回读断言、慢查询保险丝。
+/// 失败时直接向 stderr 报具体原因，并返回供审计的 reason（调用方统一记 connect-error 并退出）。
+pub fn connect_readonly(
+    profile: &Profile,
+    password: &str,
+    notice: &dyn Fn(String),
+) -> Result<Conn, String> {
+    let mut conn = Conn::new(build_opts(profile, password)).map_err(|e| {
+        eprintln!("[roq] 连接失败：{}", e);
+        e.to_string()
+    })?;
+    // 第二层防护：会话级只读。失败即中止（不允许降级为可写会话）。
+    if let Err(e) = conn.query_drop("SET SESSION TRANSACTION READ ONLY") {
+        eprintln!("[roq] 设置会话只读失败（中止查询）：{}", e);
+        return Err(format!("session-readonly: {e}"));
+    }
+    // 回读断言：防止代理/内核静默忽略 SET，导致会话实际可写。
+    let readonly_flag: Option<String> = conn
+        .query_first("SELECT @@session.transaction_read_only")
+        .map_err(|e| {
+            eprintln!("[roq] 回读只读标志失败（中止查询）：{}", e);
+            format!("verify-readonly: {e}")
+        })?;
+    if readonly_flag.as_deref() != Some("1") {
+        eprintln!(
+            "[roq] 服务端确认会话非只读（值={:?}），中止查询",
+            readonly_flag
+        );
+        return Err("verify-readonly: flag!=1".to_string());
+    }
+    // 慢查询保险丝：超时上限。个别内核不支持该变量时仅告警不阻断。
+    if let Err(e) = conn.query_drop(format!(
+        "SET SESSION max_execution_time={}",
+        MAX_EXECUTION_TIME_MS
+    )) {
+        notice(format!("[roq] 警告：未能设置 max_execution_time（{}）", e));
+    }
+    Ok(conn)
+}
+
 /// 执行一条已过闸门的查询。所有退出路径（含失败）都会写审计日志。
 pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     // --quiet 只抑制提示（prod 提醒/耗时统计等）；错误信息与退出码契约不受影响。
@@ -105,55 +145,10 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
             return log_exit("config-error", &reason, 0, false, "", 1);
         }
     };
-    let mut conn = match Conn::new(build_opts(profile, &password)) {
+    let mut conn = match connect_readonly(profile, &password, &notice) {
         Ok(conn) => conn,
-        Err(e) => {
-            eprintln!("[roq] 连接失败：{}", e);
-            return log_exit("connect-error", &e.to_string(), 0, false, "", 3);
-        }
+        Err(reason) => return log_exit("connect-error", &reason, 0, false, "", 3),
     };
-    // 第二层防护：会话级只读。失败即中止（不允许降级为可写会话）。
-    if let Err(e) = conn.query_drop("SET SESSION TRANSACTION READ ONLY") {
-        eprintln!("[roq] 设置会话只读失败（中止查询）：{}", e);
-        return log_exit(
-            "connect-error",
-            &format!("session-readonly: {e}"),
-            0,
-            false,
-            "",
-            3,
-        );
-    }
-    // 回读断言：防止代理/内核静默忽略 SET，导致会话实际可写。
-    let readonly_flag: Option<String> =
-        match conn.query_first("SELECT @@session.transaction_read_only") {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[roq] 回读只读标志失败（中止查询）：{}", e);
-                return log_exit(
-                    "connect-error",
-                    &format!("verify-readonly: {e}"),
-                    0,
-                    false,
-                    "",
-                    3,
-                );
-            }
-        };
-    if readonly_flag.as_deref() != Some("1") {
-        eprintln!(
-            "[roq] 服务端确认会话非只读（值={:?}），中止查询",
-            readonly_flag
-        );
-        return log_exit("connect-error", "verify-readonly: flag!=1", 0, false, "", 3);
-    }
-    // 慢查询保险丝：超时上限。个别内核不支持该变量时仅告警不阻断。
-    if let Err(e) = conn.query_drop(format!(
-        "SET SESSION max_execution_time={}",
-        MAX_EXECUTION_TIME_MS
-    )) {
-        notice(format!("[roq] 警告：未能设置 max_execution_time（{}）", e));
-    }
     let mut result = match conn.query_iter(sql) {
         Ok(result) => result,
         Err(e) => {
