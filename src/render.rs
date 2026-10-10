@@ -92,8 +92,14 @@ pub fn json_cell(cell: CellValue) -> String {
 }
 
 /// 渲染完整 JSON 结果文档（单行紧凑，便于管道 jq）：
-/// {"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool}
-pub fn render_json(columns: &[String], rows: &[Vec<CellValue>], truncated: bool) -> String {
+/// {"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool,"elapsedMs":N}
+#[allow(clippy::too_many_arguments)]
+pub fn render_json(
+    columns: &[String],
+    rows: &[Vec<CellValue>],
+    truncated: bool,
+    elapsed_ms: u128,
+) -> String {
     let cols: Vec<String> = columns
         .iter()
         .map(|c| format!("\"{}\"", json_escape(c)))
@@ -111,11 +117,12 @@ pub fn render_json(columns: &[String], rows: &[Vec<CellValue>], truncated: bool)
         })
         .collect();
     format!(
-        "{{\"columns\":[{}],\"rows\":[{}],\"rows_returned\":{},\"truncated\":{}}}",
+        "{{\"columns\":[{}],\"rows\":[{}],\"rows_returned\":{},\"truncated\":{},\"elapsedMs\":{}}}",
         cols.join(","),
         body.join(","),
         rows.len(),
-        truncated
+        truncated,
+        elapsed_ms
     )
 }
 
@@ -278,7 +285,7 @@ mod tests {
             vec![CellValue::Num("1".into()), CellValue::Text("alice".into())],
             vec![CellValue::Num("2".into()), CellValue::Null],
         ];
-        let doc = render_json(&columns, &rows, false);
+        let doc = render_json(&columns, &rows, false, 17);
         assert!(
             doc.starts_with('{') && doc.ends_with('}'),
             "应为单行 JSON 文档：{}",
@@ -292,6 +299,7 @@ mod tests {
         );
         assert!(doc.contains("\"rows_returned\":2"));
         assert!(doc.contains("\"truncated\":false"));
+        assert!(doc.contains("\"elapsedMs\":17"), "应含耗时：{}", doc);
     }
 
     #[test]

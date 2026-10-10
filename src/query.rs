@@ -232,7 +232,11 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     }
     match cli.format {
         OutputFormat::Json => {
-            let _ = writeln!(out, "{}", render_json(&columns, &raw_rows, truncated));
+            let _ = writeln!(
+                out,
+                "{}",
+                render_json(&columns, &raw_rows, truncated, start.elapsed().as_millis())
+            );
         }
         OutputFormat::Csv => {
             let _ = writeln!(out, "{}", render_csv(&columns, &raw_rows));
