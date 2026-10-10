@@ -1,13 +1,14 @@
 [package]
 name = "roq"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 authors = ["yuanfang"]
 description = "Read-only MySQL query CLI — 三层强制只读的数据库安全查询工具"
 license = "MIT"
 
 [dependencies]
-mysql = "26"
+# rustls-tls-ring：纯 Rust TLS 后端，保住零系统依赖/三平台可构建（native-tls 在 Linux 要 libssl-dev）
+mysql = { version = "26", features = ["rustls-tls-ring"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # 仅为 roq log 解析审计行;已在 mysql 依赖树内,不增加体积
 serde_json = "1"

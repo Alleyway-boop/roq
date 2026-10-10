@@ -34,9 +34,11 @@ pub fn build_opts(profile: &Profile, password: &str) -> Opts {
         .db_name(Some(profile.database.clone()))
         .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
         .read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
-    // 若配置声明 ssl=true 则启用 TLS（不校验证书，等价 JDBC useSSL=true）。
+    // 若配置声明 ssl=true 则启用 TLS（加密但不校验证书，等价 JDBC useSSL=true 默认语义；
+    // MySQL 服务端普遍自签证书，严格校验会挡掉绝大多数真实端点）。
     if profile.ssl {
-        builder = builder.ssl_opts(Some(SslOpts::default()));
+        builder = builder
+            .ssl_opts(Some(SslOpts::default().with_danger_accept_invalid_certs(true)));
     }
     Opts::from(builder)
 }
