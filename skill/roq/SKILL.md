@@ -56,7 +56,7 @@ stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"�
 3. **验证**：`roq config test <项目-环境>`——连接+只读断言+版本探测，通过后即可查询
 4. 管理：`roq config list`（含来源文件）；`roq config remove <名> --yes`（仅删单节文件，多节文件须手动编辑）
 
-要点：同名已存在会拒绝（改配置才需手动编辑文件）；阿里 RDS 等端点可能不宣告 TLS，`--ssl` 加了反而握手失败（报 `Client requires secure connection` 就去掉它）；无需手写 INI，手工方式（~/.roq/profiles.d/ 一项目一文件）仍支持。
+要点：同名已存在会拒绝（改配置才需手动编辑文件）；`--ssl` 启用 TLS 加密（不校验证书），报 `Client requires secure connection` 说明服务端不支持 TLS，去掉配置里的 ssl=true 即可；无需手写 INI，手工方式（~/.roq/profiles.d/ 一项目一文件）仍支持。
 
 ## 硬性安全规则
 
