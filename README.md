@@ -11,7 +11,7 @@ roq.exe [--profile 名称] [--max-rows N] [--max-cell N] [--format tsv|json|csv]
 roq tables [--profile 名称 ...]               # 快捷：SHOW TABLES
 roq schema <表|库.表> [--profile 名称 ...]    # 快捷：SHOW CREATE TABLE（表名严格校验，反引号包裹）
 roq explain "SQL语句" [--profile 名称 ...]    # 快捷：自动加 EXPLAIN 前缀
-roq skill install [--global | --project] [--force]  # 安装 AI 使用技能（SKILL.md）到 Claude Code
+roq skill install [--global | --project | --codex] [--force]  # 安装 AI 使用技能（SKILL.md）到 Claude Code / Codex
 ```
 
 - 快捷子命令只生成 SQL，**与手写查询走同一条闸门+审计+存档链路**；同样支持 `--profile/--format/--out/--quiet` 等查询 flag
@@ -104,10 +104,11 @@ ssl=true           ; 可选，是否启用 TLS（部分云数据库端点不宣�
 2. **cargo 安装**：`cargo install --git https://github.com/Alleyway-boop/roq`
 3. **源码编译**：见下节
 
-装好后把二进制所在目录加入 PATH，然后安装 AI 使用技能（供 Claude Code 在任意项目直接正确使用 roq）：
+装好后把二进制所在目录加入 PATH，然后安装 AI 使用技能（供 AI agent 在任意项目直接正确使用 roq）：
 
 ```
-roq skill install --global    # 写入 ~/.claude/skills/roq/（跨项目生效）
+roq skill install --global    # Claude Code：写入 ~/.claude/skills/roq/（跨项目生效）
+roq skill install --codex     # OpenAI Codex CLI：写入 ~/.codex/skills/roq/（全局）
 ```
 
 skill 内容随二进制打包、版本永远一致；升级 roq 后重跑一次 `install --force` 即可同步。

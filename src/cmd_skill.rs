@@ -9,17 +9,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::cli::SkillCmd;
+use crate::cli::{SkillCmd, SkillTarget};
 use crate::config::home_dir;
 
 /// 仓内规范源 skill/roq/SKILL.md，编译期嵌入二进制；发布包亦同捆此文件。
 const SKILL_MD: &str = include_str!("../skill/roq/SKILL.md");
 
 pub fn run(cmd: SkillCmd) -> ExitCode {
-    let SkillCmd::Install { global, project: _, force } = cmd;
-    // 解析层已保证 global/project 互斥且至少一真，此处直接按 global 取目标
-    let result = match resolve_target(global) {
-        Ok(target) => install_to(&target, force),
+    let SkillCmd::Install { target, force } = cmd;
+    let result = match resolve_target(&target) {
+        Ok(target_path) => install_to(&target_path, force),
         Err(msg) => Err(msg),
     };
     match result {
@@ -34,18 +33,20 @@ pub fn run(cmd: SkillCmd) -> ExitCode {
     }
 }
 
-/// 安装目标：--global 为 ~/.claude/skills/roq/，--project 为当前项目 .claude/skills/roq/。
-fn resolve_target(global: bool) -> Result<PathBuf, String> {
-    if global {
-        Ok(home_dir()?
-            .join(".claude")
-            .join("skills")
-            .join("roq")
-            .join("SKILL.md"))
-    } else {
-        let cwd = std::env::current_dir().map_err(|e| format!("无法确定当前目录：{}", e))?;
-        Ok(cwd.join(".claude").join("skills").join("roq").join("SKILL.md"))
+/// 安装目标路径：Claude 全局/项目、Codex 全局，都在 <根>/skills/roq/SKILL.md。
+fn resolve_target(target: &SkillTarget) -> Result<PathBuf, String> {
+    match target {
+        SkillTarget::ClaudeGlobal => home_dir().map(|h| skill_md_under(&h.join(".claude"))),
+        SkillTarget::ClaudeProject => std::env::current_dir()
+            .map(|cwd| skill_md_under(&cwd.join(".claude")))
+            .map_err(|e| format!("无法确定当前目录：{}", e)),
+        SkillTarget::CodexGlobal => home_dir().map(|h| skill_md_under(&h.join(".codex"))),
     }
+}
+
+/// <工具根>/skills/roq/SKILL.md：各 agent 的 skill 目录约定一致，仅根目录不同。
+fn skill_md_under(tool_root: &Path) -> PathBuf {
+    tool_root.join("skills").join("roq").join("SKILL.md")
 }
 
 /// 安装决策：写入 / 已是最新 / 拒绝覆盖（存在且不同且未 --force）。
@@ -125,6 +126,24 @@ fn is_executable_in_paths(executable: &str, paths: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_target_places_roq_skill_md_under_expected_roots() {
+        let home = home_dir().unwrap();
+        assert_eq!(
+            resolve_target(&SkillTarget::ClaudeGlobal).unwrap(),
+            home.join(".claude").join("skills").join("roq").join("SKILL.md")
+        );
+        assert_eq!(
+            resolve_target(&SkillTarget::CodexGlobal).unwrap(),
+            home.join(".codex").join("skills").join("roq").join("SKILL.md")
+        );
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_target(&SkillTarget::ClaudeProject).unwrap(),
+            cwd.join(".claude").join("skills").join("roq").join("SKILL.md")
+        );
+    }
 
     #[test]
     fn decide_installs_new_noops_identical_refuses_differs_without_force() {

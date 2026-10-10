@@ -17,7 +17,7 @@ roq 在本地闸门、服务端会话只读、输出限额三层强制只读；�
 
 - 安装：GitHub Releases 下载对应平台压缩包（含二进制与本 skill），或 `cargo install --git https://github.com/Alleyway-boop/roq`
 - 就绪：`roq --version` 能出版本号即已在 PATH；不在则把二进制所在目录加入 PATH，或暂用完整路径调用
-- 安装本技能：`roq skill install --global`（写入 `~/.claude/skills/roq/`，内容与二进制版本一致；目标已存在且不同时须加 `--force`）
+- 安装本技能：`roq skill install --global`（Claude，写入 `~/.claude/skills/roq/`）或 `--codex`（Codex CLI，写入 `~/.codex/skills/roq/`）；内容与二进制版本一致，目标已存在且不同时须加 `--force`
 
 ## 基本用法
 

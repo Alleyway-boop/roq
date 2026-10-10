@@ -33,14 +33,23 @@ pub enum Command {
     Skill(SkillCmd),
 }
 
+/// skill 安装目标：解析层保证三选一（缺省 Claude 全局），类型上杜绝非法组合。
+#[derive(Debug, PartialEq, Eq)]
+pub enum SkillTarget {
+    /// ~/.claude/skills/roq/（缺省，跨项目生效）。
+    ClaudeGlobal,
+    /// 当前项目 .claude/skills/roq/（仅本项目生效）。
+    ClaudeProject,
+    /// ~/.codex/skills/roq/（OpenAI Codex CLI 全局）。
+    CodexGlobal,
+}
+
 /// `roq skill` 子命令：安装随二进制打包的 AI 使用技能（SKILL.md）。
 #[derive(Debug)]
 pub enum SkillCmd {
     Install {
-        /// 装到 ~/.claude/skills/roq/（默认，跨项目生效）。
-        global: bool,
-        /// 装到当前项目 .claude/skills/roq/（仅本项目生效）。
-        project: bool,
+        /// 安装目标（Claude 全局/项目、Codex 全局）。
+        target: SkillTarget,
         /// 目标已存在且内容不同时仍覆盖。
         force: bool,
     },
@@ -89,7 +98,7 @@ pub fn usage() -> String {
         "      roq tables [--profile 名 ...]              # SHOW TABLES 快捷方式".to_string(),
         "      roq schema <表|库.表> [--profile 名 ...]   # SHOW CREATE TABLE 快捷方式".to_string(),
         "      roq explain \"SQL语句\" [--profile 名 ...]  # 自动加 EXPLAIN 前缀".to_string(),
-        "      roq skill install [--global | --project] [--force]  # 安装 AI 使用技能".to_string(),
+        "      roq skill install [--global | --project | --codex] [--force]  # 安装 AI 使用技能".to_string(),
         "      roq --help".to_string(),
         String::new(),
         "  --profile, -p   连接配置名（默认 dev；生产库请显式 --profile prod）".to_string(),
@@ -345,10 +354,11 @@ fn skill_usage() -> String {
         "roq skill —— AI 使用技能（SKILL.md）分发".to_string(),
         String::new(),
         "用法:".to_string(),
-        "  roq skill install [--global | --project] [--force]".to_string(),
+        "  roq skill install [--global | --project | --codex] [--force]".to_string(),
         String::new(),
         "  --global    装到 ~/.claude/skills/roq/（默认，全部项目可用）".to_string(),
         "  --project   装到当前项目 .claude/skills/roq/（仅本项目可用）".to_string(),
+        "  --codex     装到 ~/.codex/skills/roq/（OpenAI Codex CLI，全局）".to_string(),
         "  --force     目标已存在且内容不同时仍覆盖（内容相同则无需此 flag）".to_string(),
         String::new(),
         "skill 内容随二进制打包，版本永远与 roq 一致；更新 roq 后重跑 install 即可同步。".to_string(),
@@ -359,6 +369,7 @@ fn skill_usage() -> String {
 fn parse_skill_cmd(args: &[String]) -> Result<SkillCmd, String> {
     let mut global = false;
     let mut project = false;
+    let mut codex = false;
     let mut force = false;
     let mut action: Option<&str> = None;
     for arg in args {
@@ -367,6 +378,7 @@ fn parse_skill_cmd(args: &[String]) -> Result<SkillCmd, String> {
             "install" if action.is_none() => action = Some("install"),
             "--global" => global = true,
             "--project" => project = true,
+            "--codex" => codex = true,
             "--force" => force = true,
             other => return Err(format!("无法识别的参数：{}", other)),
         }
@@ -374,15 +386,14 @@ fn parse_skill_cmd(args: &[String]) -> Result<SkillCmd, String> {
     if action.is_none() {
         return Err(skill_usage());
     }
-    if global && project {
-        return Err("--global 与 --project 二选一".to_string());
-    }
-    // 缺省 --global：两 flag 都没给时视为全局安装
-    Ok(SkillCmd::Install {
-        global: !project,
-        project,
-        force,
-    })
+    let target = match (global, project, codex) {
+        // 缺省 --global：三个 flag 都没给时视为 Claude 全局
+        (false, false, false) | (true, false, false) => SkillTarget::ClaudeGlobal,
+        (false, true, false) => SkillTarget::ClaudeProject,
+        (false, false, true) => SkillTarget::CodexGlobal,
+        _ => return Err("--global、--project 与 --codex 三选一，一次只装一个目标".to_string()),
+    };
+    Ok(SkillCmd::Install { target, force })
 }
 /// 解析查询命令行参数。--help/--version 以 Err 返回完整文本（调用方直接打印后正常退出）。
 pub fn parse_args(args: &[String]) -> Result<Cli, String> {
@@ -578,20 +589,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_skill_install_defaults_to_global() {
-        let Command::Skill(SkillCmd::Install { global, project, force }) =
+    fn parse_skill_install_defaults_to_claude_global() {
+        let Command::Skill(SkillCmd::Install { target, force }) =
             parse_command(&["skill".to_string(), "install".to_string()]).unwrap()
         else {
             panic!("skill install 应产出 Skill 命令");
         };
-        assert!(global, "缺省应为全局安装");
-        assert!(!project);
+        assert_eq!(target, SkillTarget::ClaudeGlobal, "缺省应为 Claude 全局安装");
         assert!(!force);
     }
 
     #[test]
-    fn parse_skill_install_flags_and_rejections() {
-        let Command::Skill(SkillCmd::Install { global, project, force }) = parse_command(&[
+    fn parse_skill_install_targets_and_rejections() {
+        let Command::Skill(SkillCmd::Install { target, force }) = parse_command(&[
             "skill".to_string(),
             "install".to_string(),
             "--project".to_string(),
@@ -600,16 +610,32 @@ mod tests {
         .unwrap() else {
             panic!("应产出 Skill 命令");
         };
-        assert!(!global, "--project 应关闭全局");
-        assert!(project && force);
-        let err = parse_command(&[
+        assert_eq!(target, SkillTarget::ClaudeProject);
+        assert!(force);
+        let Command::Skill(SkillCmd::Install { target, .. }) = parse_command(&[
             "skill".to_string(),
             "install".to_string(),
-            "--global".to_string(),
-            "--project".to_string(),
+            "--codex".to_string(),
         ])
-        .unwrap_err();
-        assert!(err.contains("二选一"), "应拒绝互斥 flag：{}", err);
+        .unwrap() else {
+            panic!("--codex 应产出 Skill 命令");
+        };
+        assert_eq!(target, SkillTarget::CodexGlobal);
+        // 三目标两两互斥
+        for [a, b] in [
+            ["--global", "--project"],
+            ["--global", "--codex"],
+            ["--project", "--codex"],
+        ] {
+            let err = parse_command(&[
+                "skill".to_string(),
+                "install".to_string(),
+                a.to_string(),
+                b.to_string(),
+            ])
+            .unwrap_err();
+            assert!(err.contains("三选一"), "{} 与 {} 应拒绝互斥：{}", a, b, err);
+        }
         let err = parse_command(&["skill".to_string(), "install".to_string(), "--foo".to_string()])
             .unwrap_err();
         assert!(err.contains("--foo"), "未知 flag 应报错：{}", err);
