@@ -116,6 +116,7 @@ pub fn usage() -> String {
         "用法: roq [--profile 名] [--max-rows N] [--max-cell N] [--config 路径] [--list] \"SQL语句\"".to_string(),
         "      roq tables [--profile 名 ...]              # SHOW TABLES 快捷方式".to_string(),
         "      roq schema <表|库.表> [--profile 名 ...]   # SHOW CREATE TABLE 快捷方式".to_string(),
+        "      roq columns <表|库.表> [--profile 名 ...]  # SHOW FULL COLUMNS 快捷方式（含字段注释）".to_string(),
         "      roq explain \"SQL语句\" [--profile 名 ...]  # 自动加 EXPLAIN 前缀".to_string(),
         "      roq skill install [--global | --project | --codex] [--force]  # 安装 AI 使用技能".to_string(),
         "      roq diff --profile 左 --profile 右 \"SQL\" [--json]   # 同一条 SQL 两库对账比对".to_string(),
@@ -146,6 +147,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         Some("diff") => Ok(Command::Diff(parse_diff_cmd(&args[1..])?)),
         Some("tables") => shortcut_tables(&args[1..]),
         Some("schema") => shortcut_schema(&args[1..]),
+        Some("columns") => shortcut_columns(&args[1..]),
         Some("explain") => shortcut_explain(&args[1..]),
         _ => Ok(Command::Query(parse_args(args)?)),
     }
@@ -169,6 +171,20 @@ fn shortcut_schema(args: &[String]) -> Result<Command, String> {
     Ok(Command::Query(cli))
 }
 
+/// `roq columns`：SHOW FULL COLUMNS——字段/类型/可空/默认值/注释，比 schema 的完整 DDL 紧凑，
+/// 带 COMMENT 列是排查时快速看懂表结构的首选。
+fn shortcut_columns(args: &[String]) -> Result<Command, String> {
+    let (mut cli, positional) = parse_query_parts(args)?;
+    let [table] = positional.as_slice() else {
+        return Err("columns 需要恰好一个表名（可用 库.表 两段）".to_string());
+    };
+    cli.sql = Some(format!(
+        "SHOW FULL COLUMNS FROM {}",
+        quoted_table_name(table)?
+    ));
+    Ok(Command::Query(cli))
+}
+
 fn shortcut_explain(args: &[String]) -> Result<Command, String> {
     let (mut cli, positional) = parse_query_parts(args)?;
     if positional.is_empty() {
@@ -178,9 +194,9 @@ fn shortcut_explain(args: &[String]) -> Result<Command, String> {
     Ok(Command::Query(cli))
 }
 
-/// 生成 `SHOW CREATE TABLE`：表名限字母/数字/下划线/$，或 `库.表` 两段；
-/// 各段反引号包裹（兼容 order 这类保留字表名）。校验失败即拒绝拼接。
-fn build_schema_sql(table: &str) -> Result<String, String> {
+/// 表名限字母/数字/下划线/$，或 `库.表` 两段；各段反引号包裹（兼容 order 这类保留字表名）。
+/// 校验失败即拒绝拼接，供 schema / columns 快捷子命令共用。
+fn quoted_table_name(table: &str) -> Result<String, String> {
     let valid_segment = |seg: &str| {
         !seg.is_empty()
             && seg
@@ -194,8 +210,12 @@ fn build_schema_sql(table: &str) -> Result<String, String> {
             table
         ));
     }
-    let quoted: Vec<String> = parts.iter().map(|p| format!("`{}`", p)).collect();
-    Ok(format!("SHOW CREATE TABLE {}", quoted.join(".")))
+    Ok(parts.iter().map(|p| format!("`{}`", p)).collect::<Vec<_>>().join("."))
+}
+
+/// 生成 `SHOW CREATE TABLE`（完整 DDL）。
+fn build_schema_sql(table: &str) -> Result<String, String> {
+    Ok(format!("SHOW CREATE TABLE {}", quoted_table_name(table)?))
 }
 
 fn log_usage() -> String {
@@ -696,6 +716,18 @@ mod tests {
             panic!("schema 应产出 Query 命令");
         };
         assert_eq!(cli.sql.as_deref(), Some("SHOW CREATE TABLE `t_user`"));
+        // columns → SHOW FULL COLUMNS(含字段注释,校验与 schema 同一套)
+        let Command::Query(cli) =
+            parse_command(&["columns".to_string(), "mydb.t_user".to_string()]).unwrap()
+        else {
+            panic!("columns 应产出 Query 命令");
+        };
+        assert_eq!(
+            cli.sql.as_deref(),
+            Some("SHOW FULL COLUMNS FROM `mydb`.`t_user`")
+        );
+        assert!(parse_command(&["columns".to_string()]).is_err());
+        assert!(parse_command(&["columns".to_string(), "bad name".to_string()]).is_err());
         // explain → EXPLAIN 前缀,片段拼接
         let Command::Query(cli) =
             parse_command(&["explain".to_string(), "SELECT".to_string(), "1".to_string()]).unwrap()
