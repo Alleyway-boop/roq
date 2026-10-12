@@ -24,12 +24,12 @@ roq 在本地闸门、服务端会话只读、输出限额三层强制只读；�
 ```
 roq [--profile 名] [--format tsv|json|csv] [--max-rows N] "单条只读SQL"
 快捷子命令（生成 SQL 后走同一闸门+审计链路）：
-  roq tables / roq schema <表|库.表> / roq explain "SQL" / roq log [--last N] ...
+  roq tables / roq schema <表|库.表> / roq columns <表|库.表> / roq explain "SQL" / roq log [--last N] ...
 ```
 
 - **AI 消费数据默认 `--format json --quiet`**：stdout 是单文档 `{"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool,"elapsedMs":N}`（NULL→null，单元格不截断），stderr 干净；给人看才用 tsv
-- 排查起点用快捷命令：`roq tables`（看有哪些表）→ `roq schema t_xxx`（看结构）→ 再写查询；`roq explain "..."` 看执行计划
-- 两库对账用 `roq diff --profile 左 --profile 右 "SQL"`（比对列名/行数/行多重集摘要；`--json` 出机器可读结论；exit=4 表示不一致）
+- 排查起点用快捷命令：`roq tables`（看有哪些表）→ `roq columns t_xxx`（字段/类型/注释，比 schema 紧凑，看懂表首选）→ 需要完整 DDL 再 `roq schema t_xxx`；`roq explain "..."` 看执行计划
+- 两库对账用 `roq diff --profile 左 --profile 右 "SQL"`（比对列名/行数/行多重集摘要；不一致时直接给出两侧差异行样本，默认各 5 行、`--sample N` 调整；`--json` 出机器可读结论；exit=4 表示不一致）
 - 大结果 `--out 文件`（替代终端输出与自动存档）；查审计用 `roq log --last 20` / `--outcome gate-rejected`
 - 仅接受单条：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
 - tsv 格式：首行列名；`NULL` 显示为 `\N`；`\t \n \r` 转义为可见序列（保真且单行）
@@ -79,7 +79,8 @@ stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"�
 ```bash
 # 排查三步（快捷命令）
 roq tables --profile dev --format json --quiet
-roq schema t_question --profile dev
+roq columns t_question --profile dev        # 字段/类型/注释，含 COMMENT 列
+roq schema t_question --profile dev         # 需要完整 DDL 时
 roq explain "SELECT COUNT(*) FROM t_question" --profile test
 
 # 计数核对（AI 消费：json + quiet）
@@ -103,5 +104,5 @@ json 输出截断信息看顶层 `"truncated"`；长文本字段先 `LEFT(col, N
 ## 故障排查
 
 - exit=3 `Client requires secure connection`：该端点不支持 TLS，去掉配置里的 `ssl=true`
-- 终端中文乱码：输出为 UTF-8，管道/重定向正常；个别控制台代码页不同导致显示乱码，不影响数据正确性
+- 终端中文乱码：roq 启动时已自动把 Windows 控制台切到 UTF-8 代码页；仍乱码多为终端自身字体/编码设置，数据本身是 UTF-8，管道/重定向不受影响
 - profile 不存在：先 `--list` 确认名称与来源
