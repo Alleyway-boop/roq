@@ -95,5 +95,22 @@ fn run_query(cli: Cli) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    set_console_utf8();
     run()
 }
+
+/// Windows conhost（cmd / 旧版 PowerShell）默认代码页非 UTF-8，中文输出会乱码；
+/// 切到 65001。失败静默——管道/重定向不经控制台，不影响数据正确性。
+#[cfg(windows)]
+fn set_console_utf8() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleOutputCP(code_page: u32) -> i32;
+    }
+    unsafe {
+        let _ = SetConsoleOutputCP(65001);
+    }
+}
+
+#[cfg(not(windows))]
+fn set_console_utf8() {}
