@@ -8,6 +8,8 @@ use crate::render::OutputFormat;
 pub const DEFAULT_MAX_ROWS: usize = 500;
 /// 终端展示的默认单元格字符数上限（存档不截断）。
 pub const DEFAULT_MAX_CELL: usize = 200;
+/// diff 不一致时差异样本默认行数（每侧，--sample 可调，0 关闭）。
+pub const DEFAULT_DIFF_SAMPLE: usize = 5;
 
 #[derive(Debug)]
 pub struct Cli {
@@ -44,6 +46,10 @@ pub struct DiffArgs {
     pub max_rows: usize,
     /// 机器可读输出（人类可读为默认表格）。
     pub json: bool,
+    /// 配置文件或目录（与查询的 --config 同义；默认 ~/.roq 加载规则不变）。
+    pub config: Option<PathBuf>,
+    /// 不一致时两侧各展示至多 N 行差异样本（默认 5，0 关闭）。
+    pub sample: usize,
 }
 
 /// skill 安装目标：解析层保证三选一（缺省 Claude 全局），类型上杜绝非法组合。
@@ -516,11 +522,15 @@ fn diff_usage() -> String {
         "roq diff —— 同一条 SQL 在两个 profile 上执行并比对（两库对账）".to_string(),
         String::new(),
         "用法:".to_string(),
-        "  roq diff --profile 左 --profile 右 \"SQL\" [--json] [--max-rows N]".to_string(),
+        "  roq diff --profile 左 --profile 右 \"SQL\" [--json] [--max-rows N] [--sample N] [--config 路径]"
+            .to_string(),
         String::new(),
         "  --profile ×2  参与比对的两个配置（必须显式给两个，不设默认，防对错库）".to_string(),
-        "  --json        机器可读输出：{\"left\":{...},\"right\":{...},\"equal\":bool}".to_string(),
+        "  --json        机器可读输出：{\"left\":{...},\"right\":{...},\"equal\":bool,\"sample\":{...}}".to_string(),
         "  --max-rows    每侧比对行数上限（默认 500；任一侧截断时行摘要仅覆盖已取前缀）".to_string(),
+        "  --sample N    不一致时两侧各展示至多 N 行差异样本（默认 5；0 关闭）".to_string(),
+        "  --config      配置文件或目录（与查询一致；默认 ~/.roq/profiles.conf + profiles.d/*.conf）"
+            .to_string(),
         String::new(),
         "比对维度：列名（有序）、行数、行多重集摘要（顺序无关、重复敏感）。".to_string(),
         "退出码：0 一致 / 4 不一致；其余同查询（1 用法配置 / 2 闸门 / 3 连接执行）。".to_string(),
@@ -534,6 +544,8 @@ fn parse_diff_cmd(args: &[String]) -> Result<DiffArgs, String> {
     let mut profiles: Vec<String> = Vec::new();
     let mut max_rows = DEFAULT_MAX_ROWS;
     let mut json = false;
+    let mut config: Option<PathBuf> = None;
+    let mut sample = DEFAULT_DIFF_SAMPLE;
     let mut sql_parts: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -558,6 +570,20 @@ fn parse_diff_cmd(args: &[String]) -> Result<DiffArgs, String> {
                 max_rows = v.parse().map_err(|_| "--max-rows 需要正整数")?;
                 i += 1;
             }
+            "--sample" => {
+                let Some(v) = next() else {
+                    return Err("--sample 缺少参数".into());
+                };
+                sample = v.parse().map_err(|_| "--sample 需要非负整数")?;
+                i += 1;
+            }
+            "--config" => {
+                let Some(v) = next() else {
+                    return Err("--config 缺少参数".into());
+                };
+                config = Some(PathBuf::from(v));
+                i += 1;
+            }
             "--json" => json = true,
             other => {
                 if looks_like_flag(other) {
@@ -572,16 +598,18 @@ fn parse_diff_cmd(args: &[String]) -> Result<DiffArgs, String> {
         return Err(diff_usage());
     }
     if profiles.len() != 2 {
-        return Err("diff 需要恰好两个 --profile（左/右各一），不设默认防对错库".to_string());
+        return Err("diff 需要恰好两个 --profile（左/右各一），不设默认防对错库".into());
     }
     if sql_parts.is_empty() {
-        return Err("diff 需要 SQL 语句".to_string());
+        return Err("diff 需要 SQL 语句".into());
     }
     Ok(DiffArgs {
         profiles,
         sql: Some(sql_parts.join(" ")),
         max_rows,
         json,
+        config,
+        sample,
     })
 }
 
@@ -748,6 +776,10 @@ mod tests {
             "SELECT".to_string(),
             "1".to_string(),
             "--json".to_string(),
+            "--config".to_string(),
+            "/tmp/conf.d".to_string(),
+            "--sample".to_string(),
+            "10".to_string(),
         ])
         .unwrap() else {
             panic!("diff 应产出 Diff 命令");
@@ -756,6 +788,22 @@ mod tests {
         assert_eq!(args.sql.as_deref(), Some("SELECT 1"));
         assert!(args.json);
         assert_eq!(args.max_rows, DEFAULT_MAX_ROWS);
+        assert_eq!(args.config, Some(PathBuf::from("/tmp/conf.d")));
+        assert_eq!(args.sample, 10);
+        // 缺省：无 --config、样本默认值
+        let Command::Diff(args) = parse_command(&[
+            "diff".to_string(),
+            "--profile".to_string(),
+            "a".to_string(),
+            "--profile".to_string(),
+            "b".to_string(),
+            "SELECT 1".to_string(),
+        ])
+        .unwrap() else {
+            panic!("diff 应产出 Diff 命令");
+        };
+        assert_eq!(args.config, None);
+        assert_eq!(args.sample, DEFAULT_DIFF_SAMPLE);
     }
 
     #[test]
@@ -806,5 +854,18 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("--foo"), "未知 flag 应报错：{}", err);
+        // --sample 非法值
+        let err = parse_command(&[
+            "diff".to_string(),
+            "--profile".to_string(),
+            "a".to_string(),
+            "--profile".to_string(),
+            "b".to_string(),
+            "--sample".to_string(),
+            "x".to_string(),
+            "SELECT 1".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("--sample"), "非法样本数应报错：{}", err);
     }
 }
