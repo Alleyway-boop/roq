@@ -50,7 +50,8 @@ roq config list
 
 **密码加密**：Windows 上 `--password` 默认经 DPAPI 加密落盘（`enc:v1:dpapi:` 前缀 + base64 密文），
 密文绑定本机当前 Windows 用户——配置文件拷到其它机器或其它用户名下无法解开；密码以明文形式出现的
-唯一位置是录入那一刻（参数或交互输入），此后不再回显。换机器、换用户或重设密码用
+唯一位置是录入那一刻（参数或交互输入），此后不再回显。经 `--password` 参数录入时明文会留在 shell
+历史，共享环境建议交互录入或 `--password-env`。换机器、换用户或重设密码用
 `config add --update` 重新录入（落盘即重新加密）。Linux/macOS/CI 等无 DPAPI 的环境请用
 `--password-env`（凭据不落盘）。
 
@@ -147,7 +148,7 @@ skill 内容随二进制打包、版本永远一致；升级 roq 后重跑一次
 ## 编译
 
 ```
-cd C:\Data\tools\roq
+cd <仓库目录>
 cargo build --release
 cp target\release\roq.exe .\roq.exe
 ```

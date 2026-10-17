@@ -9,8 +9,15 @@ use std::path::PathBuf;
 pub const ENC_PREFIX: &str = "enc:v1:dpapi:";
 
 /// 明文密码安全警告文案（纯函数便于测试；eprintln 处只包一层）。
+/// 建议按平台编译期分流：Windows 有 --update 重录路径；非 Windows 上
+/// --password 一律被拒，--update 是死路，须指向该平台可执行的 password_env。
 pub fn plaintext_warning(name: &str) -> String {
-    format!("[roq] 警告：profile {name} 密码为明文存储，建议 config add --update 重新录入加密")
+    let guidance = if cfg!(windows) {
+        "建议 config add --update 重新录入加密"
+    } else {
+        "建议改用 password_env（或迁至 Windows 上 config add --update 重录）"
+    };
+    format!("[roq] 警告：profile {name} 密码为明文存储，{guidance}")
 }
 
 #[derive(Debug)]
@@ -59,8 +66,12 @@ impl Profile {
 /// DPAPI 解密 blob 为密码文本（仅 Windows）。
 #[cfg(windows)]
 fn decrypt_dpapi_blob(blob: &[u8]) -> Result<String, String> {
-    let plain = crate::dpapi::unprotect(blob)?;
-    String::from_utf8(plain).map_err(|_| "DPAPI 解密结果不是有效 UTF-8".to_string())
+    // 换机/换用户是最常见的失败场景，统一文案直接给出可执行的出路；
+    // unprotect 与 UTF-8 两处失败不区分、不回显 blob 内容与底层 OS 错误细节。
+    const DECRYPT_GUIDANCE: &str =
+        "此密文仅限原机原用户解密（换机/换用户后无法解开），请 config add --update 重新录入或改用 password_env";
+    let plain = crate::dpapi::unprotect(blob).map_err(|_| DECRYPT_GUIDANCE.to_string())?;
+    String::from_utf8(plain).map_err(|_| DECRYPT_GUIDANCE.to_string())
 }
 
 /// 非 Windows 平台无 DPAPI：fail-closed，密文一律拒绝而非当明文放行。
@@ -417,11 +428,45 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn plaintext_warning_text() {
         let text = plaintext_warning("dev");
         assert!(text.contains("dev"), "文案应含 profile 名：{}", text);
         assert!(text.contains("--update"), "文案应提示 --update 重录：{}", text);
         assert!(text.contains("明文"), "文案应说明明文存储：{}", text);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn plaintext_warning_text_nonwindows_suggests_password_env() {
+        // 非 Windows 上 --password 一律被拒，--update 重录是死路，建议须可执行
+        let text = plaintext_warning("dev");
+        assert!(text.contains("dev"), "文案应含 profile 名：{}", text);
+        assert!(
+            text.contains("password_env"),
+            "文案应提示改用 password_env：{}",
+            text
+        );
+        assert!(text.contains("明文"), "文案应说明明文存储：{}", text);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn bad_dpapi_blob_decrypt_error_mentions_update() {
+        // QUJD 是合法 base64（解码为 3 字节）但不是合法 DPAPI blob——
+        // Windows 上必走 unprotect 失败路径，文案须给出 --update 重录指引
+        let profile = profile_with_password(&format!("{}QUJD", ENC_PREFIX));
+        let err = profile.resolved_password("e").unwrap_err();
+        assert!(
+            err.contains("--update"),
+            "解密失败文案应指引 --update 重录：{}",
+            err
+        );
+        assert!(
+            err.contains("原机原用户"),
+            "文案应说明密文绑定原机原用户：{}",
+            err
+        );
     }
 
     #[test]
