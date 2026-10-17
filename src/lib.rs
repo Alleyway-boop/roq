@@ -12,6 +12,7 @@
 //! [`gate`] 只读闸门 / [`query`] 执行链路 / [`render`] TSV 渲染 / [`audit`] 审计日志与结果存档。
 
 pub mod audit;
+pub mod b64;
 pub mod cli;
 pub mod cmd_config;
 pub mod cmd_diff;

@@ -307,7 +307,7 @@ fn test(name: &str) -> Result<String, String> {
         .get(name)
         .ok_or_else(|| format!("[{}] 不存在；roq config list 查看全部", name))?;
     let password = profile
-        .resolved_password()
+        .resolved_password(name)
         .map_err(|e| format!("[{}] {}", name, e))?;
     let mut conn = Conn::new(build_opts(profile, &password))
         .map_err(|e| format!("[{}] 连接失败：{}", name, e))?;

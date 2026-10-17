@@ -5,6 +5,14 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+/// 密文值前缀：password 以此开头即为 DPAPI 加密密文（base64 编码），写侧（Task 4）复用。
+pub const ENC_PREFIX: &str = "enc:v1:dpapi:";
+
+/// 明文密码安全警告文案（纯函数便于测试；eprintln 处只包一层）。
+pub fn plaintext_warning(name: &str) -> String {
+    format!("[roq] 警告：profile {name} 密码为明文存储，建议 config add --update 重新录入加密")
+}
+
 #[derive(Debug)]
 pub struct Profile {
     pub host: String,
@@ -22,16 +30,46 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// 连接前解析实际密码：password_env 存在则读环境变量（未设置即报错，不回退明文）。
-    pub fn resolved_password(&self) -> Result<String, String> {
+    /// 连接前解析实际密码。`name` 是 profile 名，仅用于明文警告文案。
+    /// password_env 存在则读环境变量（未设置即报错，不回退明文）；
+    /// password 以 [`ENC_PREFIX`] 开头走 DPAPI 解密，否则视为明文并打印安全警告。
+    pub fn resolved_password(&self, name: &str) -> Result<String, String> {
         match (&self.password_env, &self.password) {
             (Some(var), _) => {
                 env::var(var).map_err(|_| format!("配置引用的环境变量 {} 未设置", var))
             }
-            (None, Some(plain)) => Ok(plain.clone()),
+            (None, Some(value)) => match value.strip_prefix(ENC_PREFIX) {
+                // base64 解码是平台无关的公共校验，先行报错（坏编码两平台行为一致）
+                Some(cipher) => {
+                    let blob = crate::b64::decode(cipher)?;
+                    decrypt_dpapi_blob(&blob)
+                }
+                None => {
+                    // 安全警告豁免 --quiet：直接 eprintln! 不走 notice 通道——
+                    // quiet 的语义是抑制提示类输出，而安全警告不是提示，必须始终可见。
+                    eprintln!("{}", plaintext_warning(name));
+                    Ok(value.clone())
+                }
+            },
             (None, None) => Err("缺少 password 或 password_env".to_string()),
         }
     }
+}
+
+/// DPAPI 解密 blob 为密码文本（仅 Windows）。
+#[cfg(windows)]
+fn decrypt_dpapi_blob(blob: &[u8]) -> Result<String, String> {
+    let plain = crate::dpapi::unprotect(blob)?;
+    String::from_utf8(plain).map_err(|_| "DPAPI 解密结果不是有效 UTF-8".to_string())
+}
+
+/// 非 Windows 平台无 DPAPI：fail-closed，密文一律拒绝而非当明文放行。
+#[cfg(not(windows))]
+fn decrypt_dpapi_blob(_blob: &[u8]) -> Result<String, String> {
+    Err(
+        "此密文由 Windows DPAPI 加密，当前平台无法解密，请在 Windows 上 config add --update 重录或改用 password_env"
+            .to_string(),
+    )
 }
 
 /// 用户主目录：优先 HOME（Unix 惯例），回退 USERPROFILE（Windows）。
@@ -242,6 +280,7 @@ pub fn print_profiles(profiles: &HashMap<String, Profile>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::b64;
 
     fn write_temp(tag: &str, content: &str) -> PathBuf {
         // 并行测试各自独立文件，避免同名互踩
@@ -304,7 +343,7 @@ mod tests {
         let profiles = load_profiles(&path).unwrap();
         let profile = &profiles["e"];
         assert_eq!(profile.password_env.as_deref(), Some(var.as_str()));
-        assert_eq!(profile.resolved_password().unwrap(), "s3cret");
+        assert_eq!(profile.resolved_password("e").unwrap(), "s3cret");
         std::env::remove_var(&var);
         let _ = fs::remove_file(&path);
     }
@@ -316,7 +355,7 @@ mod tests {
         let content = format!("[e]\nhost=h\nuser=u\npassword_env={}\ndatabase=d\n", var);
         let path = write_temp("penv-miss", &content);
         let profiles = load_profiles(&path).unwrap();
-        let err = profiles["e"].resolved_password().unwrap_err();
+        let err = profiles["e"].resolved_password("e").unwrap_err();
         assert!(err.contains(&var), "报错应含变量名：{}", err);
         assert!(err.contains("未设置"), "报错应说明变量未设置：{}", err);
         let _ = fs::remove_file(&path);
@@ -331,6 +370,66 @@ mod tests {
         let err = load_profiles(&path).unwrap_err();
         assert!(err.contains("[e]"), "报错应指明节名：{}", err);
         assert!(err.contains("password_env"), "报错应说明两键冲突：{}", err);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 不经文件直构 Profile，专门测 resolved_password 的明文/密文分流。
+    fn profile_with_password(password: &str) -> Profile {
+        Profile {
+            host: "h".to_string(),
+            port: 3306,
+            user: "u".to_string(),
+            password: Some(password.to_string()),
+            password_env: None,
+            database: "d".to_string(),
+            ssl: false,
+            source: "test".to_string(),
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn enc_value_roundtrips_through_ini_parser() {
+        let cipher = b64::encode(&crate::dpapi::protect("s3cret").unwrap());
+        let content = format!(
+            "[e]\nhost=h\nuser=u\npassword={}{}\ndatabase=d\n",
+            ENC_PREFIX, cipher
+        );
+        let path = write_temp("enc-rt", &content);
+        let profiles = load_profiles(&path).unwrap();
+        assert_eq!(profiles["e"].resolved_password("e").unwrap(), "s3cret");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn enc_prefix_on_nonwindows_fails_closed() {
+        let profile = profile_with_password(&format!("{}QUJD", ENC_PREFIX));
+        let err = profile.resolved_password("e").unwrap_err();
+        assert!(err.contains("无法解密"), "报错应说明平台无法解密：{}", err);
+    }
+
+    #[test]
+    fn bad_base64_in_enc_value_fails() {
+        let profile = profile_with_password("enc:v1:dpapi:!!!");
+        let err = profile.resolved_password("e").unwrap_err();
+        assert!(err.contains("base64"), "报错应含 base64 解错信息：{}", err);
+    }
+
+    #[test]
+    fn plaintext_warning_text() {
+        let text = plaintext_warning("dev");
+        assert!(text.contains("dev"), "文案应含 profile 名：{}", text);
+        assert!(text.contains("--update"), "文案应提示 --update 重录：{}", text);
+        assert!(text.contains("明文"), "文案应说明明文存储：{}", text);
+    }
+
+    #[test]
+    fn plaintext_password_with_equals_survives_ini_roundtrip() {
+        // 既有行为钉住：INI 按首个 '=' 切分，密码值内含 '=' 原样保留
+        let path = write_temp("pwd-eq", "[e]\nhost=h\nuser=u\npassword=a=b\ndatabase=d\n");
+        let profiles = load_profiles(&path).unwrap();
+        assert_eq!(profiles["e"].password.as_deref(), Some("a=b"));
         let _ = fs::remove_file(&path);
     }
 }

@@ -138,7 +138,7 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         None => Box::new(BufWriter::new(stdout.lock())),
     };
     // 密码在连接前解析：password_env 引用的变量未设置即中止（不回退明文）。
-    let password = match profile.resolved_password() {
+    let password = match profile.resolved_password(&cli.profile) {
         Ok(password) => password,
         Err(reason) => {
             eprintln!("[roq] {}", reason);
