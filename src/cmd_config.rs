@@ -123,8 +123,8 @@ fn add_with_sources(
     update: bool,
     sources: &[PathBuf],
 ) -> Result<String, String> {
-    // 密码两形式互斥；--password 路径记录原明文供回读解密校验用
-    let secret_line = build_secret_line(password, password_env)?;
+    // 密码两形式互斥；--password 参数或交互录入的明文都带回供回读解密校验用
+    let (secret_line, entry_plain) = build_secret_line(password, password_env)?;
     let target = match file {
         Some(path) => path,
         None => {
@@ -194,7 +194,7 @@ fn add_with_sources(
     let profile = profiles
         .get(name)
         .ok_or_else(|| "写入后回读校验失败".to_string())?;
-    if let Some(plain) = password {
+    if let Some(plain) = password.or(entry_plain.as_deref()) {
         verify_readback_decrypts(profile, name, plain)?;
     }
     Ok(format!(
@@ -211,13 +211,21 @@ const PASSWORD_NEEDS_ENCRYPTION_HINT: &str =
 
 /// 构造配置节的凭据行。--password 两形式互斥（并存直接拒绝）；
 /// `--password` 在 Windows 默认 DPAPI 加密落盘，非 Windows fail-closed 拒绝明文。
-fn build_secret_line(password: Option<&str>, password_env: Option<&str>) -> Result<String, String> {
+/// 第二个返回值是录入明文（--password 参数或交互录入，env 路径为 None），
+/// 供回读时真解密比对——交互路径的明文不经过参数，必须从这里带回。
+fn build_secret_line(
+    password: Option<&str>,
+    password_env: Option<&str>,
+) -> Result<(String, Option<String>), String> {
     match (password, password_env) {
         (Some(_), Some(_)) => {
             Err("--password 与 --password-env 二选一，请只提供其一".to_string())
         }
-        (Some(plain), None) => build_encrypted_password_line(plain),
-        (None, Some(var)) => Ok(format!("password_env={}\n", var)),
+        (Some(plain), None) => {
+            let line = build_encrypted_password_line(plain)?;
+            Ok((line, Some(plain.to_string())))
+        }
+        (None, Some(var)) => Ok((format!("password_env={}\n", var), None)),
         (None, None) => prompt_or_missing_password(),
     }
 }
@@ -242,7 +250,7 @@ fn build_encrypted_password_line(_plain: &str) -> Result<String, String> {
 /// 未提供任何密码参数时：仅 Windows 交互终端下隐藏式读入（rpassword 不回显），
 /// 空输入视为未提供走缺参报错；其余一律缺参报错——
 /// 无 TTY 无法交互，非 Windows 即使有终端也不提示（无加密能力，交互录入只会明文落盘）。
-fn prompt_or_missing_password() -> Result<String, String> {
+fn prompt_or_missing_password() -> Result<(String, Option<String>), String> {
     use std::io::IsTerminal;
     #[cfg(windows)]
     if std::io::stdin().is_terminal() {
@@ -250,7 +258,8 @@ fn prompt_or_missing_password() -> Result<String, String> {
             .map_err(|e| format!("读取密码失败：{}", e))?;
         let entered = entered.trim_end_matches(|c| c == '\r' || c == '\n');
         if !entered.is_empty() {
-            return build_encrypted_password_line(entered);
+            let line = build_encrypted_password_line(entered)?;
+            return Ok((line, Some(entered.to_string())));
         }
         // 空输入视为未提供，走下方缺参报错
     }
@@ -272,7 +281,7 @@ fn verify_readback_decrypts(
     let resolved = profile.resolved_password(name)?;
     if resolved != plain {
         return Err(format!(
-            "[{}] 回读解密校验失败：密文解开与录入明文不一致（来源 {}），请重录",
+            "回读解密校验失败：[{}] 密文解开与录入明文不一致（来源 {}），请重录",
             name, profile.source
         ));
     }
@@ -760,6 +769,23 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    /// 钉住回读校验的接线：密码路径必须带回录入明文（交互路径也经此返回），
+    /// env 路径必须不带——否则回读真解密比对会漏覆盖某条密码入口。
+    #[cfg(windows)]
+    #[test]
+    fn build_secret_line_returns_plain_for_readback() {
+        let (line, plain) = build_secret_line(Some("s3cret!"), None).unwrap();
+        assert!(
+            line.starts_with("password=enc:v1:dpapi:"),
+            "应产出密文凭据行：{}",
+            line
+        );
+        assert_eq!(plain.as_deref(), Some("s3cret!"), "明文应带回供回读比对");
+        let (line, plain) = build_secret_line(None, Some("V")).unwrap();
+        assert_eq!(line, "password_env=V\n");
+        assert!(plain.is_none(), "env 路径无明文可带回");
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn add_with_password_rejected_on_nonwindows() {
@@ -770,8 +796,8 @@ mod tests {
             "h",
             3306,
             "u",
+            Some("p"),
             None,
-            Some("PWD"),
             "d",
             false,
             Some(path.clone()),
