@@ -18,6 +18,7 @@ pub mod cmd_diff;
 pub mod cmd_log;
 pub mod cmd_skill;
 pub mod config;
+#[cfg(windows)]
 pub mod dpapi;
 pub mod gate;
 pub mod query;

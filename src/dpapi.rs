@@ -8,7 +8,9 @@
 //!   其他程序/其他用途产生的 DPAPI 密文即使同用户也无法被 roq 解开（反之亦然）；
 //! - `CRYPTPROTECT_UI_FORBIDDEN`：CLI 无界面，禁止 DPAPI 弹出任何提示窗口。
 //!
-//! 仅 Windows 提供（DPAPI 是 Windows 独有机制），整文件 `#[cfg(windows)]`。
+//! 仅 Windows 提供（DPAPI 是 Windows 独有机制）：cfg 门在 lib.rs 的
+//! `#[cfg(windows)] pub mod dpapi;` 声明处，非 Windows 平台整个模块不参与编译，
+//! 保证后续接线后三平台 CI 构建不因链接 DPAPI 失败。
 
 use std::ffi::c_void;
 use std::io::Error as IoError;
