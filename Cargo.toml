@@ -12,6 +12,8 @@ mysql = { version = "26", features = ["rustls-tls-ring"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # 仅为 roq log 解析审计行;已在 mysql 依赖树内,不增加体积
 serde_json = "1"
+# 仅为 config add 交互式读密码（不回显）；TTY 检测用 std 的 IsTerminal，不引额外 crate
+rpassword = "7"
 
 [profile.release]
 opt-level = "z"

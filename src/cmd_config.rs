@@ -2,6 +2,8 @@
 //!
 //! add 默认一配置一文件（~/.roq/profiles.d/<名>.conf），同名拒绝覆盖（重录用 --update），
 //! 写入前做跨文件同名预检，写后回读校验；
+//! 密码规则：--password 在 Windows 上默认 DPAPI 加密落盘（enc:v1:dpapi: 前缀），
+//! 写后回读时真实解密一次比对原明文；非 Windows 拒绝 --password 明文落盘，引导 --password-env；
 //! remove 仅当目标文件只含该配置节时才删整个文件，且须 --yes，多节文件提示手动编辑。
 
 use std::fs;
@@ -121,15 +123,8 @@ fn add_with_sources(
     update: bool,
     sources: &[PathBuf],
 ) -> Result<String, String> {
-    // 密码两形式互斥：并存说明调用方有歧义，直接拒绝。
-    let secret_line = match (password, password_env) {
-        (Some(_), Some(_)) => {
-            return Err("--password 与 --password-env 二选一，请只提供其一".to_string());
-        }
-        (Some(plain), _) => format!("password={}\n", plain),
-        (None, Some(var)) => format!("password_env={}\n", var),
-        (None, None) => return Err("缺少 --password 或 --password-env".to_string()),
-    };
+    // 密码两形式互斥；--password 路径记录原明文供回读解密校验用
+    let secret_line = build_secret_line(password, password_env)?;
     let target = match file {
         Some(path) => path,
         None => {
@@ -194,15 +189,104 @@ fn add_with_sources(
         }
     }
     apply_private_permissions(&target)?;
-    // 写后回读校验，确保落盘内容可被正常加载
-    load_profiles(&target)?
+    // 写后回读校验：节可加载；密码路径再真实解密一次比对原明文，防密文损坏静默落盘
+    let profiles = load_profiles(&target)?;
+    let profile = profiles
         .get(name)
         .ok_or_else(|| "写入后回读校验失败".to_string())?;
+    if let Some(plain) = password {
+        verify_readback_decrypts(profile, name, plain)?;
+    }
     Ok(format!(
         "[{}] 已写入 {}（回读校验通过）",
         name,
         target.display()
     ))
+}
+
+/// 非 Windows 平台拒绝 `--password` 的引导文案：该平台无 DPAPI，明文落盘路径一律不给。
+#[cfg(not(windows))]
+const PASSWORD_NEEDS_ENCRYPTION_HINT: &str =
+    "此平台暂不支持密码加密，请改用 --password-env（环境变量名），密码不落盘";
+
+/// 构造配置节的凭据行。--password 两形式互斥（并存直接拒绝）；
+/// `--password` 在 Windows 默认 DPAPI 加密落盘，非 Windows fail-closed 拒绝明文。
+fn build_secret_line(password: Option<&str>, password_env: Option<&str>) -> Result<String, String> {
+    match (password, password_env) {
+        (Some(_), Some(_)) => {
+            Err("--password 与 --password-env 二选一，请只提供其一".to_string())
+        }
+        (Some(plain), None) => build_encrypted_password_line(plain),
+        (None, Some(var)) => Ok(format!("password_env={}\n", var)),
+        (None, None) => prompt_or_missing_password(),
+    }
+}
+
+/// `--password` 的落盘形态：Windows 用 DPAPI 加密（[`crate::config::ENC_PREFIX`] 前缀 +
+/// base64 密文），非 Windows 无加密能力，拒绝明文落盘（fail-closed，不留任何明文路径）。
+#[cfg(windows)]
+fn build_encrypted_password_line(plain: &str) -> Result<String, String> {
+    let cipher = crate::dpapi::protect(plain)?;
+    Ok(format!(
+        "password={}{}\n",
+        crate::config::ENC_PREFIX,
+        crate::b64::encode(&cipher)
+    ))
+}
+
+#[cfg(not(windows))]
+fn build_encrypted_password_line(_plain: &str) -> Result<String, String> {
+    Err(PASSWORD_NEEDS_ENCRYPTION_HINT.to_string())
+}
+
+/// 未提供任何密码参数时：仅 Windows 交互终端下隐藏式读入（rpassword 不回显），
+/// 空输入视为未提供走缺参报错；其余一律缺参报错——
+/// 无 TTY 无法交互，非 Windows 即使有终端也不提示（无加密能力，交互录入只会明文落盘）。
+fn prompt_or_missing_password() -> Result<String, String> {
+    use std::io::IsTerminal;
+    #[cfg(windows)]
+    if std::io::stdin().is_terminal() {
+        let entered = rpassword::prompt_password("密码：")
+            .map_err(|e| format!("读取密码失败：{}", e))?;
+        let entered = entered.trim_end_matches(|c| c == '\r' || c == '\n');
+        if !entered.is_empty() {
+            return build_encrypted_password_line(entered);
+        }
+        // 空输入视为未提供，走下方缺参报错
+    }
+    #[cfg(not(windows))]
+    if std::io::stdin().is_terminal() {
+        return Err(PASSWORD_NEEDS_ENCRYPTION_HINT.to_string());
+    }
+    Err("缺少 --password 或 --password-env".to_string())
+}
+
+/// 密码路径的回读校验升级：从落盘文件按读侧同一条解密链路真实解开一次，
+/// 必须与录入明文一致，否则判定密文损坏，拒绝确认写入。
+#[cfg(windows)]
+fn verify_readback_decrypts(
+    profile: &crate::config::Profile,
+    name: &str,
+    plain: &str,
+) -> Result<(), String> {
+    let resolved = profile.resolved_password(name)?;
+    if resolved != plain {
+        return Err(format!(
+            "[{}] 回读解密校验失败：密文解开与录入明文不一致（来源 {}），请重录",
+            name, profile.source
+        ));
+    }
+    Ok(())
+}
+
+/// 非 Windows 到不了密码路径（`--password` 已在写前被拒绝），保留对称桩保证编译。
+#[cfg(not(windows))]
+fn verify_readback_decrypts(
+    _profile: &crate::config::Profile,
+    _name: &str,
+    _plain: &str,
+) -> Result<(), String> {
+    Ok(())
 }
 
 /// 在目标文件与候选源中定位同名节所在文件（目标优先）。
@@ -348,8 +432,8 @@ mod tests {
             "h",
             3307,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             true,
             Some(path.clone()),
@@ -365,8 +449,8 @@ mod tests {
             "h2",
             3306,
             "u2",
-            Some("p2"),
             None,
+            Some("PWD2"),
             "d2",
             false,
             Some(path.clone()),
@@ -380,8 +464,8 @@ mod tests {
             "h2",
             3306,
             "u2",
-            Some("p2"),
             None,
+            Some("PWD2"),
             "d2",
             false,
             Some(path.clone()),
@@ -402,8 +486,8 @@ mod tests {
             "h",
             3306,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             false,
             None,
@@ -466,8 +550,8 @@ mod tests {
             "h1",
             3306,
             "u1",
-            Some("p1"),
             None,
+            Some("PWD1"),
             "d1",
             false,
             Some(path.clone()),
@@ -479,8 +563,8 @@ mod tests {
             "h2",
             3307,
             "u2",
-            Some("p2"),
             None,
+            Some("PWD2"),
             "d2",
             true,
             Some(path.clone()),
@@ -492,8 +576,8 @@ mod tests {
             "h9",
             3308,
             "u9",
-            Some("p9"),
             None,
+            Some("PWD9"),
             "d9",
             true,
             Some(path.clone()),
@@ -528,8 +612,8 @@ mod tests {
             "h",
             3306,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             false,
             Some(path.clone()),
@@ -552,8 +636,8 @@ mod tests {
             "h",
             3306,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             false,
             Some(file_a.clone()),
@@ -566,8 +650,8 @@ mod tests {
             "h2",
             3306,
             "u2",
-            Some("p2"),
             None,
+            Some("PWD2"),
             "d2",
             false,
             Some(file_b.clone()),
@@ -587,8 +671,8 @@ mod tests {
             "h3",
             3306,
             "u3",
-            Some("p3"),
             None,
+            Some("PWD3"),
             "d3",
             false,
             Some(file_b.clone()),
@@ -617,8 +701,8 @@ mod tests {
             "h",
             3306,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             false,
             Some(good.clone()),
@@ -641,6 +725,108 @@ mod tests {
         let _ = fs::remove_file(&bad);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn add_writes_encrypted_password() {
+        let path = temp_conf("enc");
+        let _ = fs::remove_file(&path);
+        add(
+            "enc1",
+            "h",
+            3306,
+            "u",
+            Some("s3cret!"),
+            None,
+            "d",
+            false,
+            Some(path.clone()),
+            false,
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("password=enc:v1:dpapi:"),
+            "落盘应为 DPAPI 密文：{}",
+            text
+        );
+        // '!' 不在 base64 字母表内，此断言不会与密文偶然撞串
+        assert!(!text.contains("s3cret!"), "明文不得落盘：{}", text);
+        // 回读解密校验：真实解开密文并与原明文比对
+        let profiles = load_profiles(&path).unwrap();
+        assert_eq!(
+            profiles["enc1"].resolved_password("enc1").unwrap(),
+            "s3cret!"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn add_with_password_rejected_on_nonwindows() {
+        let path = temp_conf("nw");
+        let _ = fs::remove_file(&path);
+        let err = add(
+            "nw",
+            "h",
+            3306,
+            "u",
+            None,
+            Some("PWD"),
+            "d",
+            false,
+            Some(path.clone()),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("password_env"),
+            "报错应引导 --password-env：{}",
+            err
+        );
+        assert!(!path.exists(), "拒绝时不应写出目标文件");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn update_reencrypts_in_place() {
+        let path = temp_conf("reenc");
+        let _ = fs::remove_file(&path);
+        // 手写明文旧节，模拟历史明文配置
+        fs::write(
+            &path,
+            "[old]\nhost=h\nuser=u\npassword=old-plain-pwd\ndatabase=d\n",
+        )
+        .unwrap();
+        add(
+            "old",
+            "h9",
+            3306,
+            "u9",
+            Some("new-plain-pwd"),
+            None,
+            "d",
+            false,
+            Some(path.clone()),
+            true,
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("password=enc:v1:dpapi:"),
+            "--update 后应改为密文：{}",
+            text
+        );
+        // 两个明文都含 '-'（不在 base64 字母表内），不会与密文偶然撞串
+        assert!(!text.contains("old-plain-pwd"), "旧明文应被替换：{}", text);
+        assert!(!text.contains("new-plain-pwd"), "新明文也不得落盘：{}", text);
+        let profiles = load_profiles(&path).unwrap();
+        assert_eq!(
+            profiles["old"].resolved_password("old").unwrap(),
+            "new-plain-pwd"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
     #[test]
     fn remove_needs_yes_and_refuses_multi_section_file() {
         let path = temp_conf("rm");
@@ -650,8 +836,8 @@ mod tests {
             "h",
             3306,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             false,
             Some(path.clone()),
@@ -668,8 +854,8 @@ mod tests {
             "h",
             3306,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             false,
             Some(path.clone()),
@@ -681,8 +867,8 @@ mod tests {
             "h",
             3306,
             "u",
-            Some("p"),
             None,
+            Some("PWD"),
             "d",
             false,
             Some(path.clone()),

@@ -288,12 +288,15 @@ fn config_usage() -> String {
         "roq config —— 连接配置管理".to_string(),
         String::new(),
         "用法:".to_string(),
-        "  roq config add <名> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径] [--update]".to_string(),
+        "  roq config add <名> --host 主机 --user 用户 [--password 密码 | --password-env 变量名] --database 库 [--port 3306] [--ssl] [--file 路径] [--update]".to_string(),
         "  roq config remove <名> [--file 路径] --yes".to_string(),
         "  roq config test <名>".to_string(),
         "  roq config list".to_string(),
         String::new(),
         "add 默认写入 ~/.roq/profiles.d/<名>.conf（一配置一文件）；同名已存在时拒绝，重录请用 config add --update 覆盖。".to_string(),
+        "密码规则：--password 在 Windows 上默认 DPAPI 加密落盘（enc:v1:dpapi: 前缀，仅当前用户可解），".to_string(),
+        "  交互终端下省略密码参数会隐藏式提示输入；非 Windows 不接受 --password（明文不落盘），".to_string(),
+        "  跨平台/脚本场景请用 --password-env（密码经环境变量传入，不落盘）。".to_string(),
         "remove 仅当目标文件只含这一个配置节时才删文件，否则提示手动编辑；须 --yes 确认。".to_string(),
     ]
     .join("\n")
