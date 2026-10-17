@@ -53,11 +53,18 @@ stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"�
 为新项目接入（AI 可自行完成，写的是本机配置文件、非数据库操作）：
 
 1. **取凭据**：从该项目后端配置读 datasource 段（Spring 项目在 `application-{env}.yml` 的 `spring.datasource`：host/port/username/password/url 里的库名）
-2. **注册**：`roq config add <项目-环境> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径]`——命名建议 `<项目>-<dev|test|prod>`，生产必须独立命名含 `prod` 以触发显式提醒；凭据不想落明文用 `--password-env 环境变量名` 替代 `--password`（变量未设置时连接前报错，不回退）
+2. **注册**：`roq config add <项目-环境> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径]`——命名建议 `<项目>-<dev|test|prod>`，生产必须独立命名含 `prod` 以触发显式提醒；`--password` 在 Windows 默认 DPAPI 加密落盘（`enc:v1:dpapi:` 前缀，绑定本机当前用户，换机/换用户/改密用 `config add --update` 重录）；Linux/macOS/CI 无 DPAPI，`--password` 会被拒绝，改用 `--password-env 环境变量名`（凭据不落盘，变量未设置时连接前报错，不回退）
 3. **验证**：`roq config test <项目-环境>`——连接+只读断言+版本探测，通过后即可查询
 4. 管理：`roq config list`（含来源文件）；`roq config remove <名> --yes`（仅删单节文件，多节文件须手动编辑）
 
-要点：同名已存在会拒绝（改配置才需手动编辑文件）；`--ssl` 启用 TLS 加密（不校验证书），报 `Client requires secure connection` 说明服务端不支持 TLS，去掉配置里的 ssl=true 即可；无需手写 INI，手工方式（~/.roq/profiles.d/ 一项目一文件）仍支持。
+要点：同名已存在会拒绝（重录用 `config add --update`，其它手工调整才需编辑文件）；`--ssl` 启用 TLS 加密（不校验证书），报 `Client requires secure connection` 说明服务端不支持 TLS，去掉配置里的 ssl=true 即可；无需手写 INI，手工方式（~/.roq/profiles.d/ 一项目一文件）仍支持。
+
+## 只读账号（数据库侧的墙）
+
+工具三层只读只约束经 roq 发出的语句；账号自身的权限是最后一道防线。建议为 roq 使用仅有
+SELECT 权限的专用账号（`GRANT SELECT ON 目标库.* TO 'roq_ro'@'%'`，不授予任何写权限），
+不与人的账号混用。注意：Windows DPAPI 加密只防配置文件泄漏后被顺手读取与跨机解密，
+不防同用户蓄意提取——凭据万一泄漏，数据库端只读权限才是硬约束。
 
 ## 硬性安全规则
 

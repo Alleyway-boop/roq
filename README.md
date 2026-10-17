@@ -38,13 +38,25 @@ roq diff --profile 左 --profile 右 "SQL" [--json] [--max-rows N] [--sample N] 
 ```
 roq config add <名> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径]
 roq config add <名> --host ... --password-env 环境变量名 ...   # 凭据不落明文，密码改从环境变量读
+roq config add <名> --host ... --update [--password 新密码]    # 修改既有配置（重录密码即重新加密）
 roq config test <名>        # 连接 + 只读断言 + 版本探测
 roq config remove <名> --yes
 roq config list
 ```
 
 `add` 默认写入 `~/.roq/profiles.d/<名>.conf`（一配置一文件，含凭据勿外传），写后回读校验；
-同名已存在时拒绝覆盖（修改请手动编辑）；`remove` 只删"仅含该配置节"的文件且须 `--yes`，多节文件提示手动编辑。
+同名已存在时拒绝覆盖（重录用 `--update`，其它手工调整请直接编辑文件）；
+`remove` 只删"仅含该配置节"的文件且须 `--yes`，多节文件提示手动编辑。
+
+**密码加密**：Windows 上 `--password` 默认经 DPAPI 加密落盘（`enc:v1:dpapi:` 前缀 + base64 密文），
+密文绑定本机当前 Windows 用户——配置文件拷到其它机器或其它用户名下无法解开；密码以明文形式出现的
+唯一位置是录入那一刻（参数或交互输入），此后不再回显。换机器、换用户或重设密码用
+`config add --update` 重新录入（落盘即重新加密）。Linux/macOS/CI 等无 DPAPI 的环境请用
+`--password-env`（凭据不落盘）。
+
+**加密的边界**：加密只防顺手读取与文件泄漏（截图、误传、归档外流），**不防同用户的蓄意提取**——
+能以你的 Windows 账号运行程序的代码同样能解开这份密文。真正的墙是数据库端：
+为 roq 使用仅有 `GRANT SELECT` 权限的只读账号，即使凭据泄漏也无法写库（见下节）。
 
 手工方式仍然支持。默认加载（存在即生效，两者可并用；Windows 在 `%USERPROFILE%` 下，Linux/macOS 在 `$HOME` 下）：
 
@@ -66,6 +78,20 @@ ssl=true           ; 可选，启用 TLS 加密（不校验证书）；服务端
 ```
 
 `--profile` 缺省为 `dev`；建议生产库命名为 `prod` 并显式指定（工具会打印提醒）。
+
+### 只读账号建议（真正的墙在数据库端）
+
+roq 的三层保障只约束"经 roq 发出的语句"；账号本身的权限是最后一道防线，也是唯一一道
+客户端加固无法替代的防线。建议为 roq 创建专用只读账号，不与人的账号混用：
+
+```sql
+CREATE USER 'roq_ro'@'%' IDENTIFIED BY '强密码';
+GRANT SELECT ON 目标库名.* TO 'roq_ro'@'%';
+-- 不授予 INSERT / UPDATE / DELETE / DROP 等任何写权限
+```
+
+即便凭据意外泄漏，该账号也做不了写操作。密码拿到后用 `roq config add` 录入一次即可
+（Windows 落盘即加密），无需再保存明文。
 
 ## 三层只读保障
 
@@ -137,3 +163,4 @@ cp target\release\roq.exe .\roq.exe
 - [x] 分发：tag 触发 CI 三平台 Release；`roq skill install` 随二进制分发 AI 使用技能（v0.7.0）
 - [x] 对账：`roq diff` 同 SQL 双 profile 比对；`--list` 显示库名；json 带耗时（v0.8.0，源自使用者反馈）
 - [x] 对账深化：diff 差异行样本（`--sample`）、`--config` 透传、类型感知摘要；`roq columns` 快捷子命令；Windows 控制台 UTF-8（v0.9.0）
+- [x] 密码加密：Windows `config add --password` 默认 DPAPI 加密落盘（`enc:v1:dpapi:`，绑定本机本用户）；`--update` 原地重录加密；非 Windows 引导 `--password-env`（v0.10.0）

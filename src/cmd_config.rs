@@ -853,6 +853,79 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    /// 输出面回归钉住：加密密码的明文标记不得在任何用户可见输出中出现——
+    /// add 的 Ok 消息、config list（format_profiles）输出、remove 的拒绝/成功/未找到消息、
+    /// 坏密文解密失败的报错文案。标记含 '-'（不在 base64 字母表内），不会与密文偶然撞串。
+    #[cfg(windows)]
+    #[test]
+    fn no_output_surface_ever_contains_plaintext_password() {
+        const MARKER: &str = "UNIQUE-PWD-xyz";
+        let path = temp_conf("nosurf");
+        let _ = fs::remove_file(&path);
+        let add_msg = add(
+            "nosurf",
+            "h",
+            3306,
+            "u",
+            Some(MARKER),
+            None,
+            "d",
+            false,
+            Some(path.clone()),
+            false,
+        )
+        .unwrap();
+        assert!(
+            !add_msg.contains(MARKER),
+            "add 的 Ok 消息不得回显明文：{}",
+            add_msg
+        );
+        let profiles = load_profiles(&path).unwrap();
+        let list_text = crate::config::format_profiles(&profiles);
+        assert!(
+            !list_text.contains(MARKER),
+            "config list 输出不得含明文：{}",
+            list_text
+        );
+        let deny_msg = remove("nosurf", Some(path.clone()), false).unwrap_err();
+        assert!(
+            !deny_msg.contains(MARKER),
+            "remove 未确认消息不得含明文：{}",
+            deny_msg
+        );
+        let done_msg = remove("nosurf", Some(path.clone()), true).unwrap();
+        assert!(
+            !done_msg.contains(MARKER),
+            "remove 成功消息不得含明文：{}",
+            done_msg
+        );
+        let missing_msg = remove("nosurf", Some(path.clone()), true).unwrap_err();
+        assert!(
+            !missing_msg.contains(MARKER),
+            "remove 未找到消息不得含明文：{}",
+            missing_msg
+        );
+        // 坏密文场景：手写密文节（AAAA 为合法 base64，DPAPI 解密必失败），
+        // 报错文案不得回显密文或其任何片段形态
+        fs::write(
+            &path,
+            format!(
+                "[badenc]\nhost=h\nuser=u\npassword={}AAAA\ndatabase=d\n",
+                crate::config::ENC_PREFIX
+            ),
+        )
+        .unwrap();
+        let profiles = load_profiles(&path).unwrap();
+        let err = profiles["badenc"].resolved_password("badenc").unwrap_err();
+        assert!(!err.contains("AAAA"), "坏密文报错不得回显密文：{}", err);
+        assert!(
+            !err.contains(crate::config::ENC_PREFIX),
+            "坏密文报错不得回显密文前缀：{}",
+            err
+        );
+        let _ = fs::remove_file(&path);
+    }
+
     #[test]
     fn remove_needs_yes_and_refuses_multi_section_file() {
         let path = temp_conf("rm");
