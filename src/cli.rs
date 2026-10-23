@@ -109,8 +109,11 @@ pub enum ConfigCmd {
         name: String,
     },
     List,
-    /// 历史明文密码就地转 DPAPI 密文（仅 Windows）。
-    Migrate,
+    /// 历史明文密码就地转 DPAPI 密文（仅 Windows）；--config 指定文件或目录，
+    /// 覆盖 ~/.roq 之外登记（config add --file）的配置。
+    Migrate {
+        config: Option<PathBuf>,
+    },
 }
 
 pub fn usage() -> String {
@@ -296,7 +299,7 @@ fn config_usage() -> String {
         "  roq config remove <名> [--file 路径] --yes".to_string(),
         "  roq config test <名>".to_string(),
         "  roq config list".to_string(),
-        "  roq config migrate".to_string(),
+        "  roq config migrate [--config 路径]".to_string(),
         String::new(),
         "add 默认写入 ~/.roq/profiles.d/<名>.conf（一配置一文件）；同名已存在时拒绝，重录请用 config add --update 覆盖。".to_string(),
         "密码规则：--password 在 Windows 上默认 DPAPI 加密落盘（enc:v1:dpapi: 前缀，仅当前用户可解），".to_string(),
@@ -318,6 +321,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     let mut database: Option<String> = None;
     let mut ssl = false;
     let mut file: Option<PathBuf> = None;
+    let mut config: Option<PathBuf> = None;
     let mut update = false;
     let mut yes = false;
     let mut action: Option<&str> = None;
@@ -328,6 +332,10 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
             let Some(v) = args.get(i + 1) else {
                 return Err(format!("{} 缺少参数", flag));
             };
+            // 下一个参数是 flag 说明本 flag 漏了值：拒绝吞并（值以 -- 开头的场景不存在）
+            if v.starts_with("--") {
+                return Err(format!("{} 缺少参数（收到的是 flag {}）", flag, v));
+            }
             *slot = Some(v.clone());
             Ok(())
         };
@@ -335,6 +343,13 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
             "--help" | "-h" => return Err(config_usage()),
             "add" | "remove" | "test" | "list" | "migrate" if action.is_none() => {
                 action = Some(arg)
+            }
+            "--config" => {
+                let Some(v) = args.get(i + 1) else {
+                    return Err("--config 缺少参数".into());
+                };
+                config = Some(PathBuf::from(v));
+                i += 1;
             }
             "--host" => {
                 take(&mut host, arg, i)?;
@@ -382,7 +397,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     }
     match action {
         Some("list") => Ok(ConfigCmd::List),
-        Some("migrate") => Ok(ConfigCmd::Migrate),
+        Some("migrate") => Ok(ConfigCmd::Migrate { config }),
         Some("test") => Ok(ConfigCmd::Test {
             name: name.ok_or("config test 需要 <名>")?,
         }),
@@ -768,6 +783,44 @@ mod tests {
         };
         assert_eq!(target, SkillTarget::ClaudeGlobal, "缺省应为 Claude 全局安装");
         assert!(!force);
+    }
+
+    /// flag 后紧跟另一个 flag 时必须报缺参，不得把 flag 名当参数值静默吞下
+    /// （如 --password --database 把 "--database" 存成密码）。
+    #[test]
+    fn config_flag_value_cannot_be_next_flag() {
+        let err = parse_command(&[
+            "config".to_string(),
+            "add".to_string(),
+            "x".to_string(),
+            "--host".to_string(),
+            "--user".to_string(),
+            "u".to_string(),
+            "--database".to_string(),
+            "d".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("缺少参数"), "应报缺参：{}", err);
+    }
+
+    /// migrate 的 --config 透传：外部登记的配置清单要能指定给 migrate。
+    #[test]
+    fn parse_migrate_config_flag_passes_through() {
+        let Command::Config(ConfigCmd::Migrate { config }) = parse_command(&[
+            "config".to_string(),
+            "migrate".to_string(),
+            "--config".to_string(),
+            "D:\\ops\\prod.conf".to_string(),
+        ])
+        .unwrap()
+        else {
+            panic!("migrate 应产出 Migrate 命令");
+        };
+        assert_eq!(
+            config,
+            Some(PathBuf::from("D:\\ops\\prod.conf")),
+            "--config 应透传给 Migrate"
+        );
     }
 
     #[test]

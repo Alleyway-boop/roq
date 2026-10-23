@@ -6,8 +6,11 @@
 //!
 //! 安全约束：
 //! - 只替换明文 `password=` 行，注释/空行/行序/env 凭据行/已有密文逐字节保留；
-//! - 写前每条新密文都真实解密比对原明文，全部通过才写该文件（单文件原子写）；
+//! - 写前每条新密文都真实解密比对原明文，全部通过才写该文件
+//!   （`.tmp` 临时文件 + 改名原子替换，崩溃不损坏原文件）；
 //! - 迁移幂等：已密文零改写，中断后重跑续传；
+//! - 扫描范围与加载同口径（默认清单或 `--config` 指定的文件/目录），
+//!   `config add --file` 登记在 ~/.roq 之外的配置须 `--config` 指定迁移；
 //! - 非 Windows 无加密能力（明文落盘本就被禁止），fail-closed 拒绝。
 
 use std::path::PathBuf;
@@ -15,9 +18,10 @@ use std::path::PathBuf;
 #[cfg(windows)]
 use std::fs;
 
-/// 生产入口：扫描默认配置清单（profiles.conf + profiles.d/*.conf）。
-pub fn migrate() -> Result<String, String> {
-    migrate_with_sources(&crate::config::default_config_files()?)
+/// 生产入口：--config 指定文件或目录（覆盖 ~/.roq 之外登记的配置），None 用默认清单。
+pub fn migrate(config: Option<&PathBuf>) -> Result<String, String> {
+    let sources = crate::config::resolve_config_sources(config)?;
+    migrate_with_sources(&sources)
 }
 
 /// 单文件扫描结果：重写文本（无明文时与输入逐字节一致）与三类凭据计数。
@@ -45,8 +49,7 @@ pub fn migrate_with_sources(sources: &[PathBuf]) -> Result<String, String> {
             .map_err(|e| format!("读取 {} 失败：{}", source.display(), e))?;
         let outcome = encrypt_plaintext_password_lines(&text)?;
         if outcome.migrated > 0 {
-            fs::write(source, &outcome.text)
-                .map_err(|e| format!("写入 {} 失败：{}", source.display(), e))?;
+            crate::config::write_file_atomic(source, &outcome.text)?;
         } else {
             untouched_files += 1;
         }
@@ -90,11 +93,14 @@ fn encrypt_plaintext_password_lines(text: &str) -> Result<FileScanOutcome, Strin
 }
 
 /// 处理单行：明文凭据行改写为密文行并计数，密文/env 行计数后原样透传，其余行原样透传。
+/// value 取 trim 后形态（与 [`crate::config::load_profiles`] 的 value.trim() 同口径），
+/// 改写行保留原行 CRLF 行尾，不把行尾风格改混。
 #[cfg(windows)]
 fn push_rewritten_line(outcome: &mut FileScanOutcome, line: &str) -> Result<(), String> {
     let trimmed = line.trim();
     let rewritten = match trimmed.split_once('=') {
         Some((key, value)) if key.trim().eq_ignore_ascii_case("password") => {
+            let value = value.trim();
             if value.starts_with(crate::config::ENC_PREFIX) {
                 outcome.encrypted += 1;
                 None
@@ -111,6 +117,9 @@ fn push_rewritten_line(outcome: &mut FileScanOutcome, line: &str) -> Result<(), 
     match rewritten {
         Some(new_line) => {
             outcome.text.push_str(&new_line);
+            if line.ends_with('\r') {
+                outcome.text.push('\r');
+            }
             outcome.migrated += 1;
         }
         None => outcome.text.push_str(line),
@@ -230,5 +239,47 @@ mod tests {
     fn migrate_rejected_on_nonwindows() {
         let err = migrate_with_sources(&[temp_conf("mig-nw")]).unwrap_err();
         assert!(err.contains("Windows"), "报错应说明仅 Windows 支持：{}", err);
+    }
+
+    /// load_profiles 对 value 做 trim（"password = x" 的生效密码是 "x"），
+    /// migrate 的加密输入必须同口径，否则迁移前后生效密码不一致、认证失败。
+    #[cfg(windows)]
+    #[test]
+    fn migrate_trims_value_before_encrypting() {
+        let path = temp_conf("mig-trim");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            "[p]\nhost=h\nuser=u\npassword = spaced-pwd\ndatabase=d\n",
+        )
+        .unwrap();
+        migrate_with_sources(&[path.clone()]).unwrap();
+        let profiles = crate::config::load_profiles(&path).unwrap();
+        assert_eq!(
+            profiles["p"].resolved_password("p").unwrap(),
+            "spaced-pwd",
+            "迁移后解密结果应与原生效密码（trim 后）一致"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// CRLF 文件中被改写的行也须保留 \r 行尾，不得把行尾风格改混。
+    #[cfg(windows)]
+    #[test]
+    fn migrate_preserves_crlf_line_endings() {
+        let path = temp_conf("mig-crlf");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            "[a]\r\nhost=h\r\nuser=u\r\npassword=old-pwd\r\ndatabase=d\r\n",
+        )
+        .unwrap();
+        migrate_with_sources(&[path.clone()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let pieces: Vec<&str> = text.split('\n').collect();
+        for line in &pieces[..pieces.len() - 1] {
+            assert!(line.ends_with('\r'), "每个完整行都应以 CRLF 结尾：{:?}", line);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

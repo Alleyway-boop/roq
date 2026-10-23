@@ -53,7 +53,7 @@ pub fn run(cmd: ConfigCmd) -> ExitCode {
         ),
         ConfigCmd::Remove { name, file, yes } => remove(&name, file, yes),
         ConfigCmd::Test { name } => test(&name),
-        ConfigCmd::Migrate => crate::cmd_config_migrate::migrate(),
+        ConfigCmd::Migrate { config } => crate::cmd_config_migrate::migrate(config.as_ref()),
     };
     match result {
         Ok(msg) => {
@@ -178,16 +178,14 @@ fn add_with_sources(
             text = text.trim_end().to_string();
             text.push_str("\n\n");
             text.push_str(&section);
-            fs::write(&target, text)
-                .map_err(|e| format!("写入 {} 失败：{}", target.display(), e))?;
+            crate::config::write_file_atomic(&target, &text)?;
         }
         None => {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{}", e))?;
             }
             let header = "# roq 连接配置（roq config add 生成；含凭据，勿提交勿外传）\n";
-            fs::write(&target, format!("{}{}", header, section))
-                .map_err(|e| format!("写入 {} 失败：{}", target.display(), e))?;
+            crate::config::write_file_atomic(&target, &format!("{}{}", header, section))?;
         }
     }
     apply_private_permissions(&target)?;
@@ -224,6 +222,12 @@ fn build_secret_line(
             Err("--password 与 --password-env 二选一，请只提供其一".to_string())
         }
         (Some(plain), None) => {
+            if plain.is_empty() {
+                return Err(
+                    "--password 不能为空；空密码请先为账号设置密码，或改用 --password-env"
+                        .to_string(),
+                );
+            }
             let line = build_encrypted_password_line(plain)?;
             Ok((line, Some(plain.to_string())))
         }
@@ -323,25 +327,35 @@ fn locate_existing_section(
     Ok(None)
 }
 
-/// 用新节文本替换目标文件中的既有同名节：定位 `\n[名]` 行首，截到下一个 `\n[` 或文件尾。
-/// 节前既有内容（含文件头注释）原样保留，节与后文之间的空行分隔也随原文保持。
+/// 用新节文本替换目标文件中的既有同名节：按行扫描定位节头与下一节边界。
+/// 节头匹配与 [`crate::config::load_profiles`] 同口径（trim 后比较），
+/// 容忍手工编辑产生的缩进节头；节前既有内容（含文件头注释）原样保留。
 fn replace_section(target: &Path, section: &str, name: &str) -> Result<(), String> {
     let text =
         fs::read_to_string(target).map_err(|e| format!("读取 {} 失败：{}", target.display(), e))?;
     let header = format!("[{}]", name);
-    let start = if text.starts_with(&header) {
-        0
-    } else {
-        text.find(&format!("\n{}", header))
-            .map(|pos| pos + 1)
-            .ok_or_else(|| format!("[{}] 在 {} 中未定位到节文本", name, target.display()))?
-    };
-    let end = text[start..]
-        .find("\n[")
-        .map(|rel| start + rel)
-        .unwrap_or(text.len());
-    let updated = format!("{}{}{}", &text[..start], section, &text[end..]);
-    fs::write(target, updated).map_err(|e| format!("写入 {} 失败：{}", target.display(), e))?;
+    let mut updated = String::with_capacity(text.len() + section.len());
+    let mut in_section = false;
+    let mut replaced = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == header {
+            in_section = true;
+            replaced = true;
+            updated.push_str(section);
+            continue;
+        }
+        if in_section && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = false;
+        }
+        if !in_section {
+            updated.push_str(line);
+        }
+    }
+    if !replaced {
+        return Err(format!("[{}] 在 {} 中未定位到节文本", name, target.display()));
+    }
+    crate::config::write_file_atomic(target, &updated)?;
     Ok(())
 }
 
@@ -979,5 +993,41 @@ mod tests {
         let err = remove("a1", Some(path.clone()), true).unwrap_err();
         assert!(err.contains("手动编辑"));
         let _ = fs::remove_file(&path);
+    }
+
+    /// 缩进节头是 load_profiles 的合法输入（按 trim 识别），
+    /// replace_section 定位下一节边界必须同样容忍缩进，否则 --update 会静默吞掉后续节。
+    #[test]
+    fn update_keeps_indented_following_section() {
+        let path = temp_conf("indent");
+        let _ = fs::remove_file(&path);
+        fs::write(
+            &path,
+            "[a]\nhost=h\nuser=u\npassword_env=V\ndatabase=d\n  [b]\nhost=h2\nuser=u2\npassword_env=V2\ndatabase=d2\n",
+        )
+        .unwrap();
+        add(
+            "a", "h9", 3306, "u9", None, Some("V9"), "d9", false, Some(path.clone()), true,
+        )
+        .unwrap();
+        let profiles = load_profiles(&path).unwrap();
+        assert!(
+            profiles.contains_key("b"),
+            "缩进的后续节不得被静默删除：{}",
+            fs::read_to_string(&path).unwrap()
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    /// --password 空串（脚本变量为空的常见事故）必须与交互录入同口径 fail-fast，
+    /// 不得把空串加密落盘后由 config test 的 access denied 才暴露。
+    #[cfg(windows)]
+    #[test]
+    fn add_rejects_empty_password() {
+        let err = add(
+            "empty", "h", 3306, "u", Some(""), None, "d", false, Some(temp_conf("empty")), false,
+        )
+        .unwrap_err();
+        assert!(err.contains("不能为空"), "应拒绝空密码：{}", err);
     }
 }

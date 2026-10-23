@@ -42,7 +42,7 @@ roq config add <名> --host ... --update [--password 新密码]    # 修改既�
 roq config test <名>        # 连接 + 只读断言 + 版本探测
 roq config remove <名> --yes
 roq config list
-roq config migrate          # 历史明文密码就地转 DPAPI 密文（仅 Windows）
+roq config migrate [--config 路径]  # 历史明文密码就地转 DPAPI 密文（仅 Windows；--config 覆盖 ~/.roq 之外登记的配置）
 ```
 
 `add` 默认写入 `~/.roq/profiles.d/<名>.conf`（一配置一文件，含凭据勿外传），写后回读校验；

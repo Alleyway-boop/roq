@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 密文值前缀：password 以此开头即为 DPAPI 加密密文（base64 编码），写侧（Task 4）复用。
 pub const ENC_PREFIX: &str = "enc:v1:dpapi:";
@@ -232,10 +232,9 @@ pub fn default_config_files() -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-/// 收集配置来源并加载全部 profile。
-/// `config` 来自 --config（文件或目录，目录则扫描其中 *.conf，一项目一文件）；
-/// None 时加载默认清单（profiles.conf + profiles.d/*.conf）。
-pub fn load_config_sources(config: Option<&PathBuf>) -> Result<HashMap<String, Profile>, String> {
+/// 解析配置来源清单：`--config` 指定文件或目录（目录展开其中 *.conf），None 用默认清单
+/// （profiles.conf + profiles.d/*.conf）。返回具体文件清单，加载与 migrate 共用同一套定位口径。
+pub fn resolve_config_sources(config: Option<&PathBuf>) -> Result<Vec<PathBuf>, String> {
     let sources: Vec<PathBuf> = match config {
         Some(path) => {
             if !path.exists() {
@@ -245,6 +244,38 @@ pub fn load_config_sources(config: Option<&PathBuf>) -> Result<HashMap<String, P
         }
         None => default_config_files()?,
     };
+    let mut files: Vec<PathBuf> = Vec::new();
+    for source in sources {
+        if source.is_dir() {
+            files.extend(list_conf_files(&source)?);
+        } else {
+            files.push(source);
+        }
+    }
+    Ok(files)
+}
+
+/// 配置文件原子落盘：先写同目录 `.tmp` 临时文件再改名覆盖。
+/// `fs::write` 直接覆写是先截断后写入，中途崩溃会把唯一副本截成半写状态；
+/// 改名在临时文件完整落盘后一次完成，崩溃最多残留 `.tmp`，不损坏原文件。
+pub fn write_file_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("{} 不是文件路径", path.display()))?;
+    let tmp = path.with_file_name(format!("{}.tmp", file_name.to_string_lossy()));
+    fs::write(&tmp, text).map_err(|e| format!("写入 {} 失败：{}", tmp.display(), e))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("替换 {} 失败：{}", path.display(), e)
+    })?;
+    Ok(())
+}
+
+/// 收集配置来源并加载全部 profile。
+/// `config` 来自 --config（文件或目录，目录则扫描其中 *.conf，一项目一文件）；
+/// None 时加载默认清单（profiles.conf + profiles.d/*.conf）。
+pub fn load_config_sources(config: Option<&PathBuf>) -> Result<HashMap<String, Profile>, String> {
+    let sources = resolve_config_sources(config)?;
     if sources.is_empty() {
         let base = default_config_base()?;
         return Err(format!(
@@ -254,14 +285,8 @@ pub fn load_config_sources(config: Option<&PathBuf>) -> Result<HashMap<String, P
         ));
     }
     let mut profiles: HashMap<String, Profile> = HashMap::new();
-    for source in sources {
-        if source.is_dir() {
-            for file in list_conf_files(&source)? {
-                merge_profiles(&mut profiles, load_profiles(&file)?, &file)?;
-            }
-        } else {
-            merge_profiles(&mut profiles, load_profiles(&source)?, &source)?;
-        }
+    for file in sources {
+        merge_profiles(&mut profiles, load_profiles(&file)?, &file)?;
     }
     Ok(profiles)
 }
@@ -292,6 +317,55 @@ pub fn print_profiles(profiles: &HashMap<String, Profile>) {
 mod tests {
     use super::*;
     use crate::b64;
+
+    /// 来源解析三态：文件直通、目录只展开 *.conf、不存在路径报错。
+    #[test]
+    fn resolve_sources_expands_dir_and_rejects_missing() {
+        let file = write_temp(
+            "resolve-f",
+            "[a]\nhost=h\nuser=u\npassword_env=V\ndatabase=d\n",
+        );
+        assert_eq!(
+            resolve_config_sources(Some(&file)).unwrap(),
+            vec![file.clone()]
+        );
+        let dir = std::env::temp_dir().join(format!("roq-resolve-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("a.conf"),
+            "[a]\nhost=h\nuser=u\npassword_env=V\ndatabase=d\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("b.conf"),
+            "[b]\nhost=h\nuser=u\npassword_env=V\ndatabase=d\n",
+        )
+        .unwrap();
+        fs::write(dir.join("ignored.txt"), "x").unwrap();
+        let files = resolve_config_sources(Some(&dir)).unwrap();
+        assert_eq!(files.len(), 2, "目录应只展开 *.conf：{:?}", files);
+        let _ = fs::remove_dir_all(&dir);
+        let nowhere =
+            std::env::temp_dir().join(format!("roq-resolve-miss-{}.conf", std::process::id()));
+        let _ = fs::remove_file(&nowhere);
+        assert!(resolve_config_sources(Some(&nowhere)).is_err());
+        let _ = fs::remove_file(&file);
+    }
+
+    /// 原子写正确落盘且不残留 .tmp（原子性本身无法在单测中模拟崩溃，钉行为契约）。
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_tmp() {
+        let path = write_temp("atomic", "old");
+        write_file_atomic(&path, "new-content").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new-content");
+        let tmp = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!tmp.exists(), "原子写不得残留 .tmp 临时文件");
+        let _ = fs::remove_file(&path);
+    }
 
     fn write_temp(tag: &str, content: &str) -> PathBuf {
         // 并行测试各自独立文件，避免同名互踩
