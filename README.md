@@ -42,6 +42,7 @@ roq config add <名> --host ... --update [--password 新密码]    # 修改既�
 roq config test <名>        # 连接 + 只读断言 + 版本探测
 roq config remove <名> --yes
 roq config list
+roq config migrate          # 历史明文密码就地转 DPAPI 密文（仅 Windows）
 ```
 
 `add` 默认写入 `~/.roq/profiles.d/<名>.conf`（一配置一文件，含凭据勿外传），写后回读校验；
@@ -52,7 +53,9 @@ roq config list
 密文绑定本机当前 Windows 用户——配置文件拷到其它机器或其它用户名下无法解开；密码以明文形式出现的
 唯一位置是录入那一刻（参数或交互输入），此后不再回显。经 `--password` 参数录入时明文会留在 shell
 历史，共享环境建议交互录入或 `--password-env`。换机器、换用户或重设密码用
-`config add --update` 重新录入（落盘即重新加密）。Linux/macOS/CI 等无 DPAPI 的环境请用
+`config add --update` 重新录入（落盘即重新加密）。加密上线前录入的历史明文配置，
+用 `roq config migrate` 一次性就地转密文（写前解密校验、只改 `password=` 行、幂等可重跑）。
+Linux/macOS/CI 等无 DPAPI 的环境请用
 `--password-env`（凭据不落盘）。
 
 **加密的边界**：加密只防顺手读取与文件泄漏（截图、误传、归档外流），**不防同用户的蓄意提取**——
@@ -165,3 +168,4 @@ cp target\release\roq.exe .\roq.exe
 - [x] 对账：`roq diff` 同 SQL 双 profile 比对；`--list` 显示库名；json 带耗时（v0.8.0，源自使用者反馈）
 - [x] 对账深化：diff 差异行样本（`--sample`）、`--config` 透传、类型感知摘要；`roq columns` 快捷子命令；Windows 控制台 UTF-8（v0.9.0）
 - [x] 密码加密：Windows `config add --password` 默认 DPAPI 加密落盘（`enc:v1:dpapi:`，绑定本机本用户）；`--update` 原地重录加密；非 Windows 引导 `--password-env`（v0.10.0）
+- [x] 存量迁移：`config migrate` 把历史明文密码就地转 DPAPI 密文，写前解密校验、幂等可重跑（v0.10.0）

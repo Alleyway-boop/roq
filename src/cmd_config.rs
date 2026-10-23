@@ -4,7 +4,8 @@
 //! 写入前做跨文件同名预检，写后回读校验；
 //! 密码规则：--password 在 Windows 上默认 DPAPI 加密落盘（enc:v1:dpapi: 前缀），
 //! 写后回读时真实解密一次比对原明文；非 Windows 拒绝 --password 明文落盘，引导 --password-env；
-//! remove 仅当目标文件只含该配置节时才删整个文件，且须 --yes，多节文件提示手动编辑。
+//! remove 仅当目标文件只含该配置节时才删整个文件，且须 --yes，多节文件提示手动编辑；
+//! migrate（见 [`crate::cmd_config_migrate`]）把历史明文密码就地转 DPAPI 密文。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,7 @@ pub fn run(cmd: ConfigCmd) -> ExitCode {
         ),
         ConfigCmd::Remove { name, file, yes } => remove(&name, file, yes),
         ConfigCmd::Test { name } => test(&name),
+        ConfigCmd::Migrate => crate::cmd_config_migrate::migrate(),
     };
     match result {
         Ok(msg) => {

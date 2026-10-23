@@ -29,6 +29,7 @@
 | `render.rs` | tsv/json/csv 渲染与行数、单元格限额 |
 | `audit.rs` | 审计日志（月度 jsonl）与结果存档 |
 | `cmd_config.rs` / `cmd_log.rs` / `cmd_skill.rs` / `cmd_diff.rs` | config / log / skill / diff 子命令 |
+| `cmd_config_migrate.rs` | `config migrate`：历史明文密码就地转 DPAPI 密文（只改 `password=` 行、写前解密校验、幂等） |
 | `skill/roq/SKILL.md` | AI 使用技能规范源，随二进制分发（`roq skill install`） |
 
 ## 约定

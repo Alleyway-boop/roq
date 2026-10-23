@@ -109,6 +109,8 @@ pub enum ConfigCmd {
         name: String,
     },
     List,
+    /// 历史明文密码就地转 DPAPI 密文（仅 Windows）。
+    Migrate,
 }
 
 pub fn usage() -> String {
@@ -292,11 +294,13 @@ fn config_usage() -> String {
         "  roq config remove <名> [--file 路径] --yes".to_string(),
         "  roq config test <名>".to_string(),
         "  roq config list".to_string(),
+        "  roq config migrate".to_string(),
         String::new(),
         "add 默认写入 ~/.roq/profiles.d/<名>.conf（一配置一文件）；同名已存在时拒绝，重录请用 config add --update 覆盖。".to_string(),
         "密码规则：--password 在 Windows 上默认 DPAPI 加密落盘（enc:v1:dpapi: 前缀，仅当前用户可解），".to_string(),
         "  交互终端下省略密码参数会隐藏式提示输入；非 Windows 不接受 --password（明文不落盘），".to_string(),
         "  跨平台/脚本场景请用 --password-env（密码经环境变量传入，不落盘）。".to_string(),
+        "migrate 把历史明文 password 就地转 DPAPI 密文（写前解密校验、幂等可重跑；仅 Windows）。".to_string(),
         "remove 仅当目标文件只含这一个配置节时才删文件，否则提示手动编辑；须 --yes 确认。".to_string(),
     ]
     .join("\n")
@@ -327,7 +331,9 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
         };
         match arg.as_str() {
             "--help" | "-h" => return Err(config_usage()),
-            "add" | "remove" | "test" | "list" if action.is_none() => action = Some(arg),
+            "add" | "remove" | "test" | "list" | "migrate" if action.is_none() => {
+                action = Some(arg)
+            }
             "--host" => {
                 take(&mut host, arg, i)?;
                 i += 1;
@@ -374,6 +380,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     }
     match action {
         Some("list") => Ok(ConfigCmd::List),
+        Some("migrate") => Ok(ConfigCmd::Migrate),
         Some("test") => Ok(ConfigCmd::Test {
             name: name.ok_or("config test 需要 <名>")?,
         }),
