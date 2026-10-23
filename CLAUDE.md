@@ -6,7 +6,7 @@
 ## 常用命令
 
 - `cargo test` —— 改任何代码前先跑，提交前必须全绿（含闸门注入负例）
-- `cargo build --release` + `cp target/release/roq.exe ./roq.exe` —— 根目录 roq.exe 供本机调用（已 gitignore）
+- `cargo install --path .` —— 更新本机 PATH 上的 roq（~/.cargo/bin；仓库根目录不放二进制副本，避免双份不同步）
 - 发版：改 `Cargo.toml` 版本 → `git tag vX.Y.Z` → push tag，CI 自动三平台构建并挂 GitHub Releases
 
 ## 红线（改动需最严格审查）
