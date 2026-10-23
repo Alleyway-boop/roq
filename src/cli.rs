@@ -97,6 +97,8 @@ pub enum ConfigCmd {
         database: String,
         ssl: bool,
         file: Option<PathBuf>,
+        /// 覆盖重录：同名节已存在时替换而非拒绝（节不存在仍报错）。
+        update: bool,
     },
     Remove {
         name: String,
@@ -107,6 +109,8 @@ pub enum ConfigCmd {
         name: String,
     },
     List,
+    /// 历史明文密码就地转 DPAPI 密文（仅 Windows）。
+    Migrate,
 }
 
 pub fn usage() -> String {
@@ -286,12 +290,17 @@ fn config_usage() -> String {
         "roq config —— 连接配置管理".to_string(),
         String::new(),
         "用法:".to_string(),
-        "  roq config add <名> --host 主机 --user 用户 --password 密码 --database 库 [--port 3306] [--ssl] [--file 路径]".to_string(),
+        "  roq config add <名> --host 主机 --user 用户 [--password 密码 | --password-env 变量名] --database 库 [--port 3306] [--ssl] [--file 路径] [--update]".to_string(),
         "  roq config remove <名> [--file 路径] --yes".to_string(),
         "  roq config test <名>".to_string(),
         "  roq config list".to_string(),
+        "  roq config migrate".to_string(),
         String::new(),
-        "add 默认写入 ~/.roq/profiles.d/<名>.conf（一配置一文件）；同名已存在时拒绝，修改请手动编辑。".to_string(),
+        "add 默认写入 ~/.roq/profiles.d/<名>.conf（一配置一文件）；同名已存在时拒绝，重录请用 config add --update 覆盖。".to_string(),
+        "密码规则：--password 在 Windows 上默认 DPAPI 加密落盘（enc:v1:dpapi: 前缀，仅当前用户可解），".to_string(),
+        "  交互终端下省略密码参数会隐藏式提示输入；非 Windows 不接受 --password（明文不落盘），".to_string(),
+        "  跨平台/脚本场景请用 --password-env（密码经环境变量传入，不落盘）。".to_string(),
+        "migrate 把历史明文 password 就地转 DPAPI 密文（写前解密校验、幂等可重跑；仅 Windows）。".to_string(),
         "remove 仅当目标文件只含这一个配置节时才删文件，否则提示手动编辑；须 --yes 确认。".to_string(),
     ]
     .join("\n")
@@ -307,6 +316,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     let mut database: Option<String> = None;
     let mut ssl = false;
     let mut file: Option<PathBuf> = None;
+    let mut update = false;
     let mut yes = false;
     let mut action: Option<&str> = None;
     let mut i = 0;
@@ -321,7 +331,9 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
         };
         match arg.as_str() {
             "--help" | "-h" => return Err(config_usage()),
-            "add" | "remove" | "test" | "list" if action.is_none() => action = Some(arg),
+            "add" | "remove" | "test" | "list" | "migrate" if action.is_none() => {
+                action = Some(arg)
+            }
             "--host" => {
                 take(&mut host, arg, i)?;
                 i += 1;
@@ -357,6 +369,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
                 i += 1;
             }
             "--ssl" => ssl = true,
+            "--update" => update = true,
             "--yes" => yes = true,
             other if action.is_some() && name.is_none() && !other.starts_with('-') => {
                 name = Some(other.to_string())
@@ -367,6 +380,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     }
     match action {
         Some("list") => Ok(ConfigCmd::List),
+        Some("migrate") => Ok(ConfigCmd::Migrate),
         Some("test") => Ok(ConfigCmd::Test {
             name: name.ok_or("config test 需要 <名>")?,
         }),
@@ -385,6 +399,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
             database: database.ok_or("config add 缺少 --database")?,
             ssl,
             file,
+            update,
         }),
         _ => Err(config_usage()),
     }
@@ -795,6 +810,37 @@ mod tests {
         assert!(err.contains("--foo"), "未知 flag 应报错：{}", err);
         let err = parse_command(&["skill".to_string()]).unwrap_err();
         assert!(err.contains("roq skill"), "缺动作应回用法：{}", err);
+    }
+
+    #[test]
+    fn parse_config_add_reads_update_flag() {
+        let base: Vec<String> = [
+            "config",
+            "add",
+            "n",
+            "--host",
+            "h",
+            "--user",
+            "u",
+            "--password",
+            "p",
+            "--database",
+            "d",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let Command::Config(ConfigCmd::Add { update, .. }) = parse_command(&base).unwrap() else {
+            panic!("应产出 Config Add 命令");
+        };
+        assert!(!update, "缺省不应启用 --update");
+        let mut with_update = base.clone();
+        with_update.push("--update".to_string());
+        let Command::Config(ConfigCmd::Add { update, .. }) = parse_command(&with_update).unwrap()
+        else {
+            panic!("应产出 Config Add 命令");
+        };
+        assert!(update, "--update 应解析为 update=true");
     }
 
     #[test]

@@ -151,7 +151,7 @@ fn fetch_side(
 ) -> Result<SideResult, (String, String)> {
     let start = Instant::now();
     let password = profile
-        .resolved_password()
+        .resolved_password(name)
         .map_err(|e| ("config-error".to_string(), e))?;
     let mut conn =
         connect_readonly(profile, &password, &|msg| eprintln!("{}", msg))
