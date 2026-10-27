@@ -180,6 +180,7 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     }
     let mut rows_out = 0usize;
     let mut truncated = false;
+    let mut cell_truncated = false;
     while rows_out < cli.max_rows {
         let Some(row) = result.next() else { break };
         let row = match row {
@@ -216,7 +217,14 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
             OutputFormat::Tsv => {
                 let display: String = cells
                     .into_iter()
-                    .map(|cell| truncate_cell(tsv_cell(cell), display_max_cell))
+                    .map(|cell| {
+                        let escaped = tsv_cell(cell);
+                        let shown = truncate_cell(escaped.clone(), display_max_cell);
+                        if shown != escaped {
+                            cell_truncated = true;
+                        }
+                        shown
+                    })
                     .collect::<Vec<_>>()
                     .join("\t");
                 let _ = writeln!(out, "{}", display);
@@ -248,6 +256,15 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         None => save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
             .unwrap_or_default(),
     };
+    // 单格截断原本只有省略号暗示；明示并指路全量所在（提示在前，摘要收尾）。
+    // --out 与 json/csv 模式不截断，此标志不会置位。
+    if cell_truncated {
+        notice(format!(
+            "[roq] tsv 单元格超 --max-cell={} 已截断；全量见存档 {}（或改用 --format json）",
+            cli.max_cell,
+            if result_file.is_empty() { "失败" } else { &result_file }
+        ));
+    }
     notice(format!(
         "[roq] profile={} db={} 行数={}{} 耗时={}ms（会话只读）存档={}",
         cli.profile,
