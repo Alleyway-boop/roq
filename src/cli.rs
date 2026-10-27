@@ -17,6 +17,8 @@ pub struct Cli {
     pub sql: Option<String>,
     pub max_rows: usize,
     pub max_cell: usize,
+    /// 用户是否显式传了 --max-cell（true 时 SHOW CREATE TABLE 的截断豁免不生效）。
+    pub max_cell_explicit: bool,
     pub format: OutputFormat,
     /// 结果输出文件（--out）：替代终端输出与自动存档，审计 result 记此路径。
     pub out: Option<PathBuf>,
@@ -485,6 +487,7 @@ fn parse_query_parts(args: &[String]) -> Result<(Cli, Vec<String>), String> {
         sql: None,
         max_rows: DEFAULT_MAX_ROWS,
         max_cell: DEFAULT_MAX_CELL,
+        max_cell_explicit: false,
         format: OutputFormat::Tsv,
         out: None,
         quiet: false,
@@ -526,6 +529,7 @@ fn parse_query_parts(args: &[String]) -> Result<(Cli, Vec<String>), String> {
                     return Err("--max-cell 缺少参数".into());
                 };
                 cli.max_cell = v.parse().map_err(|_| "--max-cell 需要正整数")?;
+                cli.max_cell_explicit = true;
                 i += 1;
             }
             "--format" => {
@@ -711,6 +715,28 @@ mod tests {
         assert_eq!(cli.sql.as_deref(), Some("SELECT 1-2 -3"));
         let cli = parse_args(&["SELECT".to_string(), "-".to_string()]).unwrap();
         assert_eq!(cli.sql.as_deref(), Some("SELECT -"));
+    }
+
+    // --max-cell 显式传参置 explicit 标志（SHOW CREATE TABLE 的截断豁免让位于显式限流）
+    #[test]
+    fn max_cell_explicit_flag_tracks_cli_input() {
+        let cli = match parse_command(&[
+            "--max-cell".to_string(),
+            "50".to_string(),
+            "SELECT 1".to_string(),
+        ])
+        .unwrap()
+        {
+            Command::Query(cli) => cli,
+            _ => panic!("应产出 Query 命令"),
+        };
+        assert!(cli.max_cell_explicit);
+        assert_eq!(cli.max_cell, 50);
+        let cli = match parse_command(&["SELECT 1".to_string()]).unwrap() {
+            Command::Query(cli) => cli,
+            _ => panic!("应产出 Query 命令"),
+        };
+        assert!(!cli.max_cell_explicit);
     }
 
     #[test]
