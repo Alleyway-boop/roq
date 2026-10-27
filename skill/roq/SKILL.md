@@ -33,10 +33,10 @@ roq [--profile 名] [--format tsv|json|csv] [--max-rows N] "单条只读SQL"
 - 大结果 `--out 文件`（替代终端输出与自动存档）；查审计用 `roq log --last 20` / `--outcome gate-rejected`
 - 仅接受单条：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
 - tsv 格式：首行列名；`NULL` 显示为 `\N`；`\t \n \r` 转义为可见序列（保真且单行）
-- 默认限额 500 行（`--max-rows`）；tsv 终端单格 200 字符（`--max-cell`；json/csv 与存档不截断）
+- 默认限额 500 行（`--max-rows`）；tsv 终端单格 200 字符（`--max-cell`；json/csv 与存档不截断；`SHOW CREATE TABLE` 免截断，显式传 `--max-cell` 除外）
 - 退出码：`0` 成功 / `1` 用法配置错 / `2` 闸门拒绝 / `3` 连接执行错 / `4` diff 不一致
 
-stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"、结果存档路径；`--quiet` 会抑制，人看场景保留它向用户报告）。
+stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"、结果存档路径；`--quiet` 会抑制，人看场景保留它向用户报告）。tsv 单格被截时另有提示行指明存档路径（`--quiet` 同样抑制）。
 
 ## 审计与存档（自动，不可关）
 
