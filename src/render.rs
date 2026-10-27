@@ -1,4 +1,4 @@
-//! 渲染：单元格类型归一 + TSV/JSON/CSV 三格式输出 + 存档文件名表名提取。
+//! 渲染：单元格类型归一 + TSV/JSON/CSV 三格式输出 + 存档文件名表名提取 + 终端截断策略。
 
 use crate::audit::json_escape;
 use crate::gate::extract_tokens;
@@ -221,6 +221,29 @@ pub fn table_slug(sql: &str) -> Option<String> {
     None
 }
 
+/// 语句是否为 SHOW CREATE TABLE（输入应为闸门规范化后的 SQL）。
+/// 词元由 extract_tokens 归全大写，大小写混写天然免疫；该语句的单格即交付物，终端不截断。
+pub fn is_show_create(sql: &str) -> bool {
+    let tokens = extract_tokens(sql);
+    tokens.first().map(String::as_str) == Some("SHOW")
+        && tokens.get(1).map(String::as_str) == Some("CREATE")
+        && tokens.get(2).map(String::as_str) == Some("TABLE")
+}
+
+/// 终端 tsv 单格截断上限：--out 全量；SHOW CREATE TABLE（未显式限流时）全量；其余按 --max-cell。
+pub fn terminal_max_cell(
+    is_out: bool,
+    is_show_create_stmt: bool,
+    max_cell_explicit: bool,
+    max_cell: usize,
+) -> usize {
+    if is_out || (is_show_create_stmt && !max_cell_explicit) {
+        usize::MAX
+    } else {
+        max_cell
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +353,31 @@ mod tests {
         assert_eq!(kept, " ABC ");
         let cut = truncate_cell("中文字符截断测试".to_string(), 4);
         assert_eq!(cut, "中文字符…"); // 按字符数而非字节数截断
+    }
+
+    #[test]
+    fn is_show_create_matches_normalized_statements() {
+        assert!(is_show_create("SHOW CREATE TABLE t_user"));
+        // extract_tokens 归全大写，大小写混写免疫
+        assert!(is_show_create("show create table t_user"));
+        assert!(is_show_create("SHOW CREATE TABLE `mydb`.`t_user`"));
+        assert!(!is_show_create("SELECT 1"));
+        assert!(!is_show_create("SHOW TABLES"));
+        assert!(!is_show_create("SHOW CREATE DATABASE x"));
+        assert!(!is_show_create(""));
+    }
+
+    #[test]
+    fn terminal_max_cell_exemptions() {
+        // --out 全量（既有先例）
+        assert_eq!(terminal_max_cell(true, false, false, 200), usize::MAX);
+        // SHOW CREATE TABLE 未显式限流 → 全量
+        assert_eq!(terminal_max_cell(false, true, false, 200), usize::MAX);
+        // 显式 --max-cell 优先于豁免
+        assert_eq!(terminal_max_cell(false, true, true, 200), 200);
+        assert_eq!(terminal_max_cell(false, true, true, 500), 500);
+        // 普通语句按 --max-cell
+        assert_eq!(terminal_max_cell(false, false, false, 200), 200);
     }
 
     #[test]
