@@ -2,7 +2,8 @@
 
 只读 MySQL 查询 CLI（Rust 单二进制，~2.5MB）。安全是产品本体：**任何改动不得削弱三层只读保障**。
 语言约定：CLI 可见文本、代码注释、CLAUDE.md、SKILL.md 一律中文；代码标识符英文；
-**面向仓库读者的文档默认英文**（README / CHANGELOG / docs/ 下的说明文档）；docs/superpowers/ 带日期的过程记录维持原语言不回译。
+**README 为双语对照**（`README.md` 英文默认门面 + `README.zh-CN.md` 中文版，顶部互链，改动必须两份同步）；
+CHANGELOG 与 docs/ 下的说明文档默认英文；docs/superpowers/ 带日期的过程记录维持原语言不回译。
 
 ## 常用命令
 

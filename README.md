@@ -2,6 +2,8 @@
 
 > **A read-only MySQL client you can point at production without fear.**
 
+Read this in: [简体中文](README.zh-CN.md)
+
 [![Release](https://img.shields.io/github/v/release/Alleyway-boop/roq)](https://github.com/Alleyway-boop/roq/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
