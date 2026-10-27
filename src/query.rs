@@ -13,7 +13,8 @@ use crate::audit::{append_audit_log, audit_line, json_escape, save_result};
 use crate::cli::Cli;
 use crate::config::Profile;
 use crate::render::{
-    raw_cell, render_csv, render_json, truncate_cell, tsv_cell, CellValue, OutputFormat,
+    is_show_create, raw_cell, render_csv, render_json, terminal_max_cell, truncate_cell, tsv_cell,
+    CellValue, OutputFormat,
 };
 
 /// 连接超时（秒）。
@@ -163,12 +164,14 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         .map(|col| col.name_str().to_string())
         .collect();
     // 存档恒为 TSV（lines 收集全量转义行，不截断）；json/csv 额外收集归一单元格，结束时整体渲染。
-    // --out 写文件不截断（--max-cell 仅终端显示限流）；--out 时审计 result 记该路径（替代自动存档）。
-    let display_max_cell = if cli.out.is_some() {
-        usize::MAX
-    } else {
-        cli.max_cell
-    };
+    // --out 写文件即交付全量（--max-cell 仅终端显示限流），审计 result 记该路径（替代自动存档）；
+    // SHOW CREATE TABLE 的单格即交付物，未显式限流时终端不截断。
+    let display_max_cell = terminal_max_cell(
+        cli.out.is_some(),
+        is_show_create(sql),
+        cli.max_cell_explicit,
+        cli.max_cell,
+    );
     let out_path = cli.out.as_ref().map(|p| p.display().to_string());
     let mut lines: Vec<String> = vec![columns.join("\t")];
     let mut raw_rows: Vec<Vec<CellValue>> = Vec::new();
