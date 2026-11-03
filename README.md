@@ -65,6 +65,7 @@ roq config test myproj-prod
 
 # 3. Look around, then query
 roq tables --profile myproj-prod
+roq tables mark --profile myproj-prod              # fuzzy: bare substring, auto-wrapped in %
 roq columns t_order --profile myproj-prod          # fields, types, comments
 roq --profile myproj-prod --format json --quiet "SELECT COUNT(*) AS cnt FROM t_order"
 ```
@@ -78,9 +79,9 @@ query.
 ```
 roq [--profile NAME] [--format tsv|json|csv] [--max-rows N] [--max-cell N]
     [--out FILE] [--quiet] [--config PATH] [--list] "SINGLE READ-ONLY SQL"
-roq tables [flags]                    # SHOW TABLES
+roq tables [PATTERN] [flags]          # SHOW TABLES (substring auto-wrapped in %; explicit % used verbatim)
 roq schema <table|db.table> [flags]   # SHOW CREATE TABLE (strict name validation)
-roq columns <table|db.table> [flags]  # SHOW FULL COLUMNS (fields, types, comments)
+roq columns <table|db.table> [PATTERN] [flags]  # SHOW FULL COLUMNS (fields, types, comments; PATTERN filters)
 roq explain "SQL" [flags]             # prefixes EXPLAIN
 roq diff --profile LEFT --profile RIGHT "SQL" [--json] [--sample N] [flags]
 roq config add|test|remove|list|migrate ...

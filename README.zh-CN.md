@@ -54,6 +54,7 @@ roq config test myproj-prod
 
 # 3. 先看有哪些表，再查询
 roq tables --profile myproj-prod
+roq tables mark --profile myproj-prod              # 模糊找表：子串自动包 %
 roq columns t_order --profile myproj-prod          # 字段、类型、注释
 roq --profile myproj-prod --format json --quiet "SELECT COUNT(*) AS cnt FROM t_order"
 ```
@@ -65,9 +66,9 @@ Windows 上密码落盘那一刻即经 DPAPI 加密。生产 profile 命名含 `
 ```
 roq [--profile 名] [--format tsv|json|csv] [--max-rows N] [--max-cell N]
     [--out 文件] [--quiet] [--config 路径] [--list] "单条只读SQL"
-roq tables [flags]                    # SHOW TABLES
+roq tables [模式] [flags]             # SHOW TABLES（子串自动包 %；显式 % 按通配符原样）
 roq schema <表|库.表> [flags]         # SHOW CREATE TABLE（表名严格校验）
-roq columns <表|库.表> [flags]        # SHOW FULL COLUMNS（字段/类型/注释）
+roq columns <表|库.表> [列模式] [flags]  # SHOW FULL COLUMNS（字段/类型/注释；列模式可过滤）
 roq explain "SQL" [flags]             # 自动加 EXPLAIN 前缀
 roq diff --profile 左 --profile 右 "SQL" [--json] [--sample N] [flags]
 roq config add|test|remove|list|migrate ...

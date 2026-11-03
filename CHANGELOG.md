@@ -10,6 +10,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). V
 
 ### Added
 
+- `roq tables` and `roq columns` accept an optional filter pattern: a bare substring is
+  auto-wrapped as `%substring%` (`roq tables mark`), while a pattern containing `%` is used
+  verbatim for LIKE matching (`roq tables t_report%`). Generated SQL walks the same gate,
+  audit, and archive path as before.
 - `SHOW CREATE TABLE` output is no longer cell-truncated on the terminal — the DDL is the
   deliverable and now arrives in one step (`roq schema` included). An explicit `--max-cell`
   still takes precedence over the exemption.

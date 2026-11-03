@@ -24,11 +24,14 @@ roq 在本地闸门、服务端会话只读、输出限额三层强制只读；�
 ```
 roq [--profile 名] [--format tsv|json|csv] [--max-rows N] "单条只读SQL"
 快捷子命令（生成 SQL 后走同一闸门+审计链路）：
-  roq tables / roq schema <表|库.表> / roq columns <表|库.表> / roq explain "SQL" / roq log [--last N] ...
+  roq tables [模式] / roq schema <表|库.表> / roq columns <表|库.表> [列模式] / roq explain "SQL" / roq log [--last N] ...
+⚠ 顺序规则（勿混用）：tables/schema/columns/explain 子命令必须紧跟 roq，flag 一律放子命令之后
+  ✓ roq columns t_xxx --profile dev
+  ✗ roq --profile dev columns t_xxx（会被当作 SQL 送去闸门拒绝）
 ```
 
 - **AI 消费数据默认 `--format json --quiet`**：stdout 是单文档 `{"columns":[...],"rows":[[...]],"rows_returned":N,"truncated":bool,"elapsedMs":N}`（NULL→null，单元格不截断），stderr 干净；给人看才用 tsv
-- 排查起点用快捷命令：`roq tables`（看有哪些表）→ `roq columns t_xxx`（字段/类型/注释，比 schema 紧凑，看懂表首选）→ 需要完整 DDL 再 `roq schema t_xxx`；`roq explain "..."` 看执行计划
+- 排查起点用快捷命令：`roq tables`（看有哪些表；带模式即模糊过滤——`roq tables mark` 子串自动包 %，`roq tables t_report%` 前缀匹配）→ `roq columns t_xxx`（字段/类型/注释，比 schema 紧凑，看懂表首选；`roq columns t_xxx task` 可过滤列名）→ 需要完整 DDL 再 `roq schema t_xxx`；`roq explain "..."` 看执行计划
 - 两库对账用 `roq diff --profile 左 --profile 右 "SQL"`（比对列名/行数/行多重集摘要；不一致时直接给出两侧差异行样本，默认各 5 行、`--sample N` 调整；`--json` 出机器可读结论；exit=4 表示不一致）
 - 大结果 `--out 文件`（替代终端输出与自动存档）；查审计用 `roq log --last 20` / `--outcome gate-rejected`
 - 仅接受单条：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
@@ -86,7 +89,9 @@ SELECT 权限的专用账号（`GRANT SELECT ON 目标库.* TO 'roq_ro'@'%'`，�
 ```bash
 # 排查三步（快捷命令）
 roq tables --profile dev --format json --quiet
+roq tables mark --profile dev               # 模糊找表：子串自动包 %，t_report% 做前缀匹配
 roq columns t_question --profile dev        # 字段/类型/注释，含 COMMENT 列
+roq columns t_question task_num --profile dev   # 第二参数过滤列名
 roq schema t_question --profile dev         # 需要完整 DDL 时
 roq explain "SELECT COUNT(*) FROM t_question" --profile test
 
