@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::config::{default_config_base, home_dir};
-use crate::render::table_slug;
+use crate::render::{like_slug, table_slug};
 
 /// 本地时间戳（ISO 8601 含毫秒与时区）。
 fn now_local() -> String {
@@ -112,7 +112,9 @@ pub fn save_result(
         if fs::create_dir_all(&dir).is_err() {
             continue;
         }
-        let slug = table_slug(sql).unwrap_or_else(|| "query".to_string());
+        let slug = table_slug(sql)
+            .or_else(|| like_slug(sql))
+            .unwrap_or_else(|| "query".to_string());
         let path = dir.join(format!("{}-{}-{}.tsv", stamp, slug, profile));
         let mut body = String::new();
         body.push_str(&format!("# 时间: {}\n", now_local()));

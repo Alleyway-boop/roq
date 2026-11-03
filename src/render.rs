@@ -221,6 +221,61 @@ pub fn table_slug(sql: &str) -> Option<String> {
     None
 }
 
+/// 从 SQL 提取首个 `LIKE '<模式>'` 字面量内容（SHOW ... LIKE 等无表名可提取的场景），
+/// 供存档文件名标注过滤模式：保留字母/数字/下划线/%，其余折叠为 -，限 40 字符。
+/// 词级大小写不敏感扫描，不依赖 token 化（% 会被 extract_tokens 当分词符丢弃）。
+pub fn like_slug(sql: &str) -> Option<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    for i in 0..chars.len() {
+        let prev_is_word = i > 0 && is_word(chars[i - 1]);
+        let matches_keyword = chars[i].to_ascii_lowercase() == 'l'
+            && chars.get(i + 1).copied().is_some_and(|c| c.to_ascii_lowercase() == 'i')
+            && chars.get(i + 2).copied().is_some_and(|c| c.to_ascii_lowercase() == 'k')
+            && chars.get(i + 3).copied().is_some_and(|c| c.to_ascii_lowercase() == 'e');
+        if prev_is_word || !matches_keyword {
+            continue;
+        }
+        if chars.get(i + 4).copied().is_some_and(is_word) {
+            continue;
+        }
+        let mut j = i + 4;
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if chars.get(j) != Some(&'\'') {
+            continue;
+        }
+        let mut pattern = String::new();
+        let mut closed = false;
+        let mut k = j + 1;
+        while k < chars.len() {
+            if chars[k] == '\'' {
+                // 字面量内 '' 为转义单引号：取一个 ' 继续扫描，不在截断处提前收尾
+                if chars.get(k + 1) == Some(&'\'') {
+                    pattern.push('\'');
+                    k += 2;
+                    continue;
+                }
+                closed = true;
+                break;
+            }
+            pattern.push(chars[k]);
+            k += 1;
+        }
+        // 未闭合字面量（扫到串尾未见收尾引号）不产出，fail 侧拒绝
+        if closed && !pattern.is_empty() {
+            let slug: String = pattern
+                .chars()
+                .map(|c| if is_word(c) || c == '%' { c } else { '-' })
+                .take(40)
+                .collect();
+            return Some(slug);
+        }
+    }
+    None
+}
+
 /// 语句是否为 SHOW CREATE TABLE（输入应为闸门规范化后的 SQL）。
 /// 词元由 extract_tokens 归全大写，大小写混写天然免疫；该语句的单格即交付物，终端不截断。
 pub fn is_show_create(sql: &str) -> bool {
@@ -378,6 +433,29 @@ mod tests {
         assert_eq!(terminal_max_cell(false, true, true, 500), 500);
         // 普通语句按 --max-cell
         assert_eq!(terminal_max_cell(false, false, false, 200), 200);
+    }
+
+    #[test]
+    fn like_slug_extracts_pattern_literal() {
+        assert_eq!(
+            like_slug("SHOW TABLES LIKE '%mark%'").as_deref(),
+            Some("%mark%")
+        );
+        // 大小写不敏感 + 前缀匹配模式
+        assert_eq!(
+            like_slug("show full columns from `t_user` like 'task%'").as_deref(),
+            Some("task%")
+        );
+        // 字面量内 '' 转义穿透扫描不提前截断；' 不属文件名安全字符，折叠为 -
+        assert_eq!(
+            like_slug("SHOW TABLES LIKE '%a''b%'").as_deref(),
+            Some("%a-b%")
+        );
+        // 空字面量与未闭合字面量不产出
+        assert_eq!(like_slug("SHOW TABLES LIKE ''"), None);
+        assert_eq!(like_slug("SHOW TABLES LIKE '%open"), None);
+        // 非 LIKE 关键词（词内片段）不误触
+        assert_eq!(like_slug("SELECT unlike_col FROM t"), None);
     }
 
     #[test]
