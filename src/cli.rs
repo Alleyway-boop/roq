@@ -168,7 +168,7 @@ fn shortcut_tables(args: &[String]) -> Result<Command, String> {
     let (mut cli, positional) = parse_query_parts(args)?;
     cli.sql = Some(match positional.as_slice() {
         [] => "SHOW TABLES".to_string(),
-        [pattern] => format!("SHOW TABLES LIKE {}", like_pattern_literal(pattern)),
+        [pattern] => format!("SHOW TABLES LIKE {}", like_pattern_literal(pattern)?),
         extra => {
             return Err(format!(
                 "tables 至多接受一个位置参数（过滤模式）：{}",
@@ -203,7 +203,7 @@ fn shortcut_columns(args: &[String]) -> Result<Command, String> {
             cli.sql = Some(format!(
                 "SHOW FULL COLUMNS FROM {} LIKE {}",
                 quoted_table_name(table)?,
-                like_pattern_literal(pattern)
+                like_pattern_literal(pattern)?
             ));
         }
         extra => {
@@ -251,12 +251,19 @@ fn build_schema_sql(table: &str) -> Result<String, String> {
 
 /// LIKE 模式进单引号字面量：显式含 % 时按 LIKE 通配符原样使用（t_report% 做前缀匹配），
 /// 其余（含 snake_case 的 `_`）视为子串自动包 %...%；单引号双写转义（SQL 标准写法，与 SQL mode 无关）。
-fn like_pattern_literal(pattern: &str) -> String {
+/// 反斜杠一律拒绝：MySQL 默认模式把它当转义前缀（\b 即退格），静默改变语义不如显式报错。
+fn like_pattern_literal(pattern: &str) -> Result<String, String> {
+    if pattern.contains('\\') {
+        return Err(
+            "过滤模式不支持反斜杠（MySQL 会将其解释为转义前缀，语义易歧义）；请去掉反斜杠后重试"
+                .to_string(),
+        );
+    }
     let escaped = pattern.replace('\'', "''");
     if pattern.contains('%') {
-        format!("'{}'", escaped)
+        Ok(format!("'{}'", escaped))
     } else {
-        format!("'%{}%'", escaped)
+        Ok(format!("'%{}%'", escaped))
     }
 }
 
@@ -897,6 +904,24 @@ mod tests {
     fn columns_rejects_zero_and_three_positional_args() {
         assert!(parse_command(&["columns".to_string()]).is_err());
         assert!(parse_command(&["columns".to_string(), "a".to_string(), "b".to_string(), "c".to_string()]).is_err());
+    }
+
+    #[test]
+    fn tables_pattern_rejects_backslash() {
+        let err = parse_command(&["tables".to_string(), "a\\b".to_string()]).unwrap_err();
+        assert!(err.contains("反斜杠"), "报错应说明反斜杠：{err}");
+    }
+
+    #[test]
+    fn columns_pattern_rejects_backslash() {
+        assert!(
+            parse_command(&[
+                "columns".to_string(),
+                "t_user".to_string(),
+                "a\\b".to_string()
+            ])
+            .is_err()
+        );
     }
 
     #[test]
