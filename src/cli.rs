@@ -166,10 +166,16 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
 
 fn shortcut_tables(args: &[String]) -> Result<Command, String> {
     let (mut cli, positional) = parse_query_parts(args)?;
-    if !positional.is_empty() {
-        return Err(format!("tables 不接受位置参数：{}", positional.join(" ")));
-    }
-    cli.sql = Some("SHOW TABLES".to_string());
+    cli.sql = Some(match positional.as_slice() {
+        [] => "SHOW TABLES".to_string(),
+        [pattern] => format!("SHOW TABLES LIKE {}", like_pattern_literal(pattern)),
+        extra => {
+            return Err(format!(
+                "tables 至多接受一个位置参数（过滤模式）：{}",
+                extra.join(" ")
+            ))
+        }
+    });
     Ok(Command::Query(cli))
 }
 
@@ -183,16 +189,30 @@ fn shortcut_schema(args: &[String]) -> Result<Command, String> {
 }
 
 /// `roq columns`：SHOW FULL COLUMNS——字段/类型/可空/默认值/注释，比 schema 的完整 DDL 紧凑，
-/// 带 COMMENT 列是排查时快速看懂表结构的首选。
+/// 带 COMMENT 列是排查时快速看懂表结构的首选。第二位置参数为列名过滤模式。
 fn shortcut_columns(args: &[String]) -> Result<Command, String> {
     let (mut cli, positional) = parse_query_parts(args)?;
-    let [table] = positional.as_slice() else {
-        return Err("columns 需要恰好一个表名（可用 库.表 两段）".to_string());
-    };
-    cli.sql = Some(format!(
-        "SHOW FULL COLUMNS FROM {}",
-        quoted_table_name(table)?
-    ));
+    match positional.as_slice() {
+        [table] => {
+            cli.sql = Some(format!(
+                "SHOW FULL COLUMNS FROM {}",
+                quoted_table_name(table)?
+            ));
+        }
+        [table, pattern] => {
+            cli.sql = Some(format!(
+                "SHOW FULL COLUMNS FROM {} LIKE {}",
+                quoted_table_name(table)?,
+                like_pattern_literal(pattern)
+            ));
+        }
+        extra => {
+            return Err(format!(
+                "columns 需要 1-2 个位置参数（表名 [列模式]，可用 库.表 两段）：{}",
+                extra.join(" ")
+            ))
+        }
+    }
     Ok(Command::Query(cli))
 }
 
@@ -227,6 +247,17 @@ fn quoted_table_name(table: &str) -> Result<String, String> {
 /// 生成 `SHOW CREATE TABLE`（完整 DDL）。
 fn build_schema_sql(table: &str) -> Result<String, String> {
     Ok(format!("SHOW CREATE TABLE {}", quoted_table_name(table)?))
+}
+
+/// LIKE 模式进单引号字面量：显式含 % 时按 LIKE 通配符原样使用（t_report% 做前缀匹配），
+/// 其余（含 snake_case 的 `_`）视为子串自动包 %...%；单引号双写转义（SQL 标准写法，与 SQL mode 无关）。
+fn like_pattern_literal(pattern: &str) -> String {
+    let escaped = pattern.replace('\'', "''");
+    if pattern.contains('%') {
+        format!("'{}'", escaped)
+    } else {
+        format!("'%{}%'", escaped)
+    }
 }
 
 fn log_usage() -> String {
@@ -794,10 +825,89 @@ mod tests {
         };
         assert_eq!(cli.sql.as_deref(), Some("EXPLAIN SELECT 1"));
         // 错误形态:参数个数与非法表名
-        assert!(parse_command(&["tables".to_string(), "多余".to_string()]).is_err());
+        assert!(parse_command(&["tables".to_string(), "多余".to_string(), "更多".to_string()]).is_err());
         assert!(parse_command(&["schema".to_string()]).is_err());
         assert!(parse_command(&["schema".to_string(), "bad name".to_string()]).is_err());
         assert!(parse_command(&["explain".to_string()]).is_err());
+    }
+
+    #[test]
+    fn tables_with_pattern_builds_show_tables_like() {
+        match parse_command(&["tables".to_string(), "mark".to_string()]) {
+            Ok(Command::Query(cli)) => assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE '%mark%'")),
+            _ => panic!("tables 带模式应产出 Query 命令"),
+        }
+    }
+
+    #[test]
+    fn tables_with_percent_keeps_pattern_verbatim() {
+        match parse_command(&["tables".to_string(), "t_report%".to_string()]) {
+            Ok(Command::Query(cli)) => assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE 't_report%'")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn tables_with_snake_case_searches_substring() {
+        match parse_command(&["tables".to_string(), "t_user".to_string()]) {
+            Ok(Command::Query(cli)) => assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE '%t_user%'")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn tables_pattern_escapes_single_quote_and_passes_gate() {
+        match parse_command(&["tables".to_string(), "a'b".to_string()]) {
+            Ok(Command::Query(cli)) => {
+                let sql = cli.sql.expect("应有 SQL");
+                assert_eq!(sql, "SHOW TABLES LIKE '%a''b%'");
+                assert!(crate::gate::gate(&sql).is_ok(), "生成 SQL 应能过闸门：{sql}");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn tables_rejects_extra_positional_args() {
+        assert!(parse_command(&["tables".to_string(), "a".to_string(), "b".to_string()]).is_err());
+    }
+
+    #[test]
+    fn columns_with_pattern_appends_like() {
+        match parse_command(&["columns".to_string(), "t_user".to_string(), "task_num".to_string()]) {
+            Ok(Command::Query(cli)) => assert_eq!(
+                cli.sql.as_deref(),
+                Some("SHOW FULL COLUMNS FROM `t_user` LIKE '%task_num%'")
+            ),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn columns_without_pattern_unchanged() {
+        match parse_command(&["columns".to_string(), "t_user".to_string()]) {
+            Ok(Command::Query(cli)) => {
+                assert_eq!(cli.sql.as_deref(), Some("SHOW FULL COLUMNS FROM `t_user`"))
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn columns_rejects_zero_and_three_positional_args() {
+        assert!(parse_command(&["columns".to_string()]).is_err());
+        assert!(parse_command(&["columns".to_string(), "a".to_string(), "b".to_string(), "c".to_string()]).is_err());
+    }
+
+    #[test]
+    fn tables_pattern_coexists_with_flags() {
+        match parse_command(&["tables".to_string(), "mark".to_string(), "--format".to_string(), "json".to_string()]) {
+            Ok(Command::Query(cli)) => {
+                assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE '%mark%'"));
+                assert!(matches!(cli.format, OutputFormat::Json));
+            }
+            _ => panic!(),
+        }
     }
 
     #[test]
