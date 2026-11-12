@@ -18,6 +18,7 @@ pub mod cmd_config;
 pub mod cmd_config_migrate;
 pub mod cmd_diff;
 pub mod cmd_log;
+pub mod cmd_q;
 pub mod cmd_skill;
 pub mod config;
 #[cfg(windows)]

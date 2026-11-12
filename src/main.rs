@@ -9,6 +9,7 @@ use roq::cli::{parse_command, Cli, Command};
 use roq::cmd_config;
 use roq::cmd_diff;
 use roq::cmd_log;
+use roq::cmd_q;
 use roq::cmd_skill;
 use roq::config::{load_config_sources, print_profiles};
 use roq::gate::gate;
@@ -37,12 +38,9 @@ fn run() -> ExitCode {
         Command::Log(log_args) => cmd_log::run(log_args),
         Command::Skill(skill_cmd) => cmd_skill::run(skill_cmd),
         Command::Diff(diff_args) => cmd_diff::run(diff_args),
-        // 临时臂（控制器裁决，Task 4 记账）：解析层先行合入，q 的管理链路在 Task 5、
-        // 执行链路在 Task 6 接线后原位替换。fail-closed：未接线一律显式报错退 1，绝不静默。
-        Command::Q(_) => {
-            eprintln!("roq q 管理子命令尚未接线");
-            ExitCode::from(EXIT_USAGE)
-        }
+        Command::Q(qcmd) => cmd_q::run(qcmd),
+        // 临时臂（控制器裁决，Task 4 记账）：执行链路在 Task 6 接线后原位替换。
+        // fail-closed：未接线一律显式报错退 1，绝不静默。
         Command::SavedQuery { .. } => {
             eprintln!("roq q 执行链路尚未接线");
             ExitCode::from(EXIT_USAGE)
