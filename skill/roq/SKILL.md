@@ -24,8 +24,8 @@ roq 在本地闸门、服务端会话只读、输出限额三层强制只读；�
 ```
 roq [--profile 名] [--format tsv|json|csv] [--max-rows N] "单条只读SQL"
 快捷子命令（生成 SQL 后走同一闸门+审计链路）：
-  roq tables [模式] / roq schema <表|库.表> / roq columns <表|库.表> [列模式] / roq explain "SQL" / roq log [--last N] ...
-⚠ 顺序规则（勿混用）：tables/schema/columns/explain 子命令必须紧跟 roq，flag 一律放子命令之后
+  roq tables [模式] / roq schema <表|库.表> / roq columns <表|库.表> [列模式] / roq explain "SQL" / roq q <名> [k=v ...] / roq log [--last N] ...
+⚠ 顺序规则（勿混用）：tables/schema/columns/explain/q 子命令必须紧跟 roq，flag 一律放子命令之后
   ✓ roq columns t_xxx --profile dev
   ✗ roq --profile dev columns t_xxx（会被当作 SQL 送去闸门拒绝）
 ```
@@ -43,10 +43,27 @@ stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"�
 
 ## 审计与存档（自动，不可关）
 
-- 审计日志：`~/.roq/logs/roq-YYYYMM.jsonl`（Windows 在 `%USERPROFILE%` 下）——每次调用一行 JSON（时间/环境/库/SQL/行数/耗时/结果路径），被闸门拒绝的尝试也留痕。用户问"查过什么"时直接读这个文件。
+- 审计日志：`~/.roq/logs/roq-YYYYMM.jsonl`（Windows 在 `%USERPROFILE%` 下）——每次调用一行 JSON（时间/环境/库/SQL/行数/耗时/结果路径），被闸门拒绝、参数错误的尝试同样留痕。用户问"查过什么"时直接读这个文件。
 - 结果存档：项目目录 `.roq/results/YYYYMMDD/时分秒-毫秒-<表名>-<profile>.tsv`（非项目目录则退回 `~/.roq/results/`）。
   文件头 `# ` 开头的行是元信息（时间/库/SQL），TSV 数据从首个非 `#` 行开始；单元格不截断、`\t \n \r \N` 为转义。
   复查历史查询结果优先读存档，避免重查数据库。
+
+## 保存查询（roq q）
+
+把反复使用的查询存为命名模板，之后一条短命令带参执行；子命令细节见 `roq q --help`。
+
+- 保存：`roq q add <名> "SQL模板"`，模板里 `{{名}}` 是占位符；`q list` 列举（名 + 模板首行）、`q show <名>` 原样看模板、`q remove <名> --yes` 删除；同名重录加 `--update`（缺省拒绝覆盖）
+- 执行：`roq q <名> k=v ...`，k 按占位符名对应填入，缺参/多参/重参一律报错；值不得含 `'` 或 `\`（占位符是宏替换而非绑定参数，这两类字符会改变 SQL 语义；需要时改写模板并在其中用 `''` 转义）；`--profile`/`--format` 等查询 flag 照常跟在后面
+- 存储：`~/.roq/queries.d/<名>.sql`，一查询一文件；文件头 `--` 注释行是说明文字，正文可手工编辑、改后即时生效；查询名限字母/数字/下划线/连字符，不得占用子命令保留名（config/log/skill/diff/tables/schema/columns/explain/q/add/list/show/remove/help）
+- 安全语义：保存时占位符换哑值预检过只读闸门（静态禁词在保存时即暴露）；执行时替换后的 SQL 再全量过闸门——**保存 ≠ 永久放行**，闸门规则演进后存量查询同样可能被拒（exit=2，按提示改模板）
+- 审计：触网前的失败（查询不存在/参数错误）记 `param-error`，`roq log --outcome param-error` 可筛；保存查询的审计行带 `saved`/`params` 字段；存档文件名用查询名，文件头附模板名与当次参数
+
+```bash
+# 保存：计数模板，两个占位符
+roq q add cnt-by-day "SELECT COUNT(*) AS cnt FROM t_example WHERE created>='{{day}}' AND status='{{status}}'"
+# 调用：按名填参，与手写查询走同一条闸门+审计+存档链路
+roq q cnt-by-day day=2026-11-01 status=PAID --profile dev --format json --quiet
+```
 
 ## 环境 profile
 

@@ -30,6 +30,9 @@ development databases — used by humans directly, and by AI agents through a bu
   environment-variable credentials on Linux/macOS/CI.
 - **Reconciliation built in** — `roq diff` runs one SQL statement on two profiles and reports
   mismatches with sample diff rows.
+- **Named saved queries** — `roq q` stores recurring SQL as templates with `{{placeholder}}`
+  parameters; call them by name with `k=v` arguments and they run through the same read-only
+  gate and audit trail.
 - **Single static binary** — written in Rust, ~2.5 MB, zero runtime dependencies.
 
 ## Installation
@@ -83,6 +86,8 @@ roq tables [PATTERN] [flags]          # SHOW TABLES (substring auto-wrapped in %
 roq schema <table|db.table> [flags]   # SHOW CREATE TABLE (strict name validation)
 roq columns <table|db.table> [PATTERN] [flags]  # SHOW FULL COLUMNS (fields, types, comments; PATTERN filters)
 roq explain "SQL" [flags]             # prefixes EXPLAIN
+roq q <name> [k=v ...] [flags]        # run a saved query by name (params fill {{placeholders}})
+roq q add|list|show|remove ...        # manage saved queries (details: roq q --help)
 roq diff --profile LEFT --profile RIGHT "SQL" [--json] [--sample N] [flags]
 roq config add|test|remove|list|migrate ...
 roq log [--today|--month|--last N] [--profile NAME] [--outcome TYPE] [--json]
@@ -139,6 +144,40 @@ text `'1'` do not compare equal). On mismatch it prints sample rows present on o
 (`--sample N`, default 5 per side, `0` disables; JSON output exposes them as
 `sample.leftOnly` / `sample.rightOnly`). Exactly two `--profile` flags must be given explicitly,
 so you never diff against the wrong database. Each side writes its own audit entry.
+
+### Saved queries with `roq q`
+
+Store a recurring SQL statement as a named template, then re-run it with parameters:
+
+```bash
+# Save: {{name}} marks a parameter placeholder in the template
+roq q add cnt-by-day "SELECT COUNT(*) AS cnt FROM t_example WHERE created >= '{{day}}' AND status = '{{status}}'"
+
+# Run: k=v arguments fill the placeholders by name; query flags work as usual
+roq q cnt-by-day day=2026-11-01 status=PAID --profile myproj-prod --format json --quiet
+
+# Manage
+roq q list                    # query names + first line of each template
+roq q show cnt-by-day         # print the template file verbatim
+roq q remove cnt-by-day --yes
+```
+
+- Templates live in `~/.roq/queries.d/<name>.sql`, one file per query. The file starts with a
+  `--` comment header (documentation); the rest is the SQL template — hand-editable, effective
+  immediately. Names are limited to letters, digits, `_`, and `-`, and cannot shadow
+  subcommand names (`config`, `log`, `q`, `add`, …). Re-adding an existing name requires
+  `--update`.
+- Substitution is macro-style text replacement, not bound parameters: missing, extra, or
+  duplicate `k=v` arguments are rejected, and values may not contain `'` or `\` — either would
+  change the SQL's meaning. To represent such characters, rewrite the template and escape with
+  `''` inside it.
+- **Saving is not a permanent pass.** At save time the template with dummy values passes a gate
+  precheck, so static violations surface early; at run time the substituted SQL goes through the
+  full gate again — a gate rule change can reject a query that used to pass.
+- Failures before any connection is attempted (unknown query, bad parameters) are audited under
+  the `param-error` outcome. Saved-query audit entries carry `saved` / `params` fields, and the
+  archive file is named after the query, with the query name and parameters recorded in its
+  `# ` header.
 
 ## Connection profiles
 
@@ -236,13 +275,15 @@ Automatic and **cannot be disabled** — this is the tool's ledger of record.
 
 - **Audit log**: `~/.roq/logs/roq-YYYYMM.jsonl`, one JSON line per invocation:
   `ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`. Outcomes include
-  `ok`, `gate-rejected` (with the rejection reason), `connect-error`, `exec-error`,
-  `config-error` — rejected attempts are logged too. Query it with `roq log` (defaults to
-  today; `--month` / `--last N` for wider views).
+  `ok`, `param-error` (saved-query substitution failure, with the reason), `gate-rejected`
+  (with the rejection reason), `connect-error`, `exec-error`, `config-error` — rejected attempts
+  are logged too. Query it with `roq log` (defaults to today; `--month` / `--last N` for wider
+  views).
 - **Result archive**: `.roq/results/YYYYMMDD/HHMMSS-mmm-<table>-<profile>.tsv` inside the
   current project directory (falls back to `~/.roq/results/` outside a project). A `# ` header
   block records time, database, row cap, and SQL; cells are **never truncated**. The file name
-  includes the table, so you can tell what was queried without opening it. Add `.roq/` to your
+  includes the table — the query name for saved queries, whose headers also record the
+  parameters used — so you can tell what was queried without opening it. Add `.roq/` to your
   project's `.gitignore`.
 
 ## Roadmap

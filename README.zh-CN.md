@@ -22,6 +22,8 @@
   `--format json --quiet` 输出单文档便于机器消费。
 - **凭据落盘即密**——Windows 上 DPAPI 加密绑定本机用户；Linux/macOS/CI 走环境变量凭据。
 - **内置对账**——`roq diff` 同一条 SQL 跑两个 profile，不一致时给出差异行样本。
+- **保存查询**——`roq q` 把常用 SQL 存为带 `{{占位符}}` 的命名模板，按名传 `k=v` 参数调用，
+  照走同一条只读闸门与审计链路。
 - **单静态二进制**——Rust 编写，约 2.5 MB，零运行时依赖。
 
 ## 安装
@@ -70,6 +72,8 @@ roq tables [模式] [flags]             # SHOW TABLES（子串自动包 %；显�
 roq schema <表|库.表> [flags]         # SHOW CREATE TABLE（表名严格校验）
 roq columns <表|库.表> [列模式] [flags]  # SHOW FULL COLUMNS（字段/类型/注释；列模式可过滤）
 roq explain "SQL" [flags]             # 自动加 EXPLAIN 前缀
+roq q <名> [k=v ...] [flags]          # 按名执行保存查询（参数填入 {{占位符}}）
+roq q add|list|show|remove ...        # 保存查询管理（详情 roq q --help）
 roq diff --profile 左 --profile 右 "SQL" [--json] [--sample N] [flags]
 roq config add|test|remove|list|migrate ...
 roq log [--today|--month|--last N] [--profile 名] [--outcome 类型] [--json]
@@ -118,6 +122,33 @@ json/csv 是交换格式——**单元格不截断**（`--max-cell` 仅影响 ts
 重复敏感——数值 `1` 与文本 `'1'` 不会误判一致）。不一致时按多重集差集展示单侧独有行样本
 （`--sample N`，默认每侧 5 行，`0` 关闭；json 输出在 `sample.leftOnly` / `sample.rightOnly`）。
 恰好两个 `--profile` 必须显式给出，杜绝对错库；两侧各写一条审计。
+
+### 用 `roq q` 保存查询
+
+把常用 SQL 存为命名模板，带参反复执行：
+
+```bash
+# 保存：模板里的 {{名}} 是参数占位符
+roq q add cnt-by-day "SELECT COUNT(*) AS cnt FROM t_example WHERE created >= '{{day}}' AND status = '{{status}}'"
+
+# 执行：k=v 参数按占位符名填入；查询 flag 照常可用
+roq q cnt-by-day day=2026-11-01 status=PAID --profile myproj-prod --format json --quiet
+
+# 管理
+roq q list                    # 查询名 + 各模板首行
+roq q show cnt-by-day         # 原样输出模板文件
+roq q remove cnt-by-day --yes
+```
+
+- 模板存于 `~/.roq/queries.d/<名>.sql`，一查询一文件。文件头是 `--` 注释说明；其余为 SQL 模板，
+  可手工编辑、改后即时生效。查询名仅限字母、数字、`_`、`-`，不得占用子命令保留名
+  （`config`、`log`、`q`、`add` 等）；同名重录须加 `--update`。
+- 替换是宏替换而非绑定参数：缺参/多参/重参一律报错，值不得含 `'` 或 `\`——两者都会改变 SQL
+  语义；需要表示这类字符时，改写模板并在其中用 `''` 转义。
+- **保存 ≠ 永久放行。** 保存时模板以哑参预检过只读闸门，静态违规提前暴露；执行时替换后的 SQL
+  再次全量过闸门——闸门规则演进后，过去能过的存量查询同样可能被拒。
+- 触网前的失败（查询不存在、参数错误）以 `param-error` 结果类别留审计。保存查询的审计行带
+  `saved` / `params` 字段；存档文件名用查询名，文件头记录查询名与当次参数。
 
 ## 连接配置
 
@@ -200,11 +231,13 @@ ssl=true             ; 可选：TLS 加密（不校验证书）
 
 - **审计日志**：`~/.roq/logs/roq-YYYYMM.jsonl`，每次调用一行 JSON：
   `ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`。`outcome` 含
-  `ok`、`gate-rejected`（含拒绝原因）、`connect-error`、`exec-error`、`config-error`——被拒的
-  尝试同样留痕。用 `roq log` 查询（默认今天；`--month` / `--last N` 扩大范围）。
+  `ok`、`param-error`（保存查询参数替换失败，含原因）、`gate-rejected`（含拒绝原因）、
+  `connect-error`、`exec-error`、`config-error`——被拒的尝试同样留痕。用 `roq log` 查询
+  （默认今天；`--month` / `--last N` 扩大范围）。
 - **结果存档**：当前项目目录 `.roq/results/YYYYMMDD/HHMMSS-毫秒-<表名>-<profile>.tsv`（非项目
   位置退回 `~/.roq/results/`）。文件头 `# ` 元信息块记录时间、库、行数上限与 SQL；**单元格不截
-  断**。文件名自动带表名，不打开文件就能认出查了哪张表。项目 `.gitignore` 加一行 `.roq/` 即可。
+  断**。文件名自动带表名（保存查询用查询名，文件头另附当次参数），不打开文件就能认出查了什么。
+  项目 `.gitignore` 加一行 `.roq/` 即可。
 
 ## 路线图
 
