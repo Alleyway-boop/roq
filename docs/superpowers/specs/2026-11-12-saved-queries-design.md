@@ -88,11 +88,18 @@ shell 历史。本功能把这类语句保存命名，之后 `roq q <名> [k=v .
 9. **审计与存档**：审计 `extra` 增 `,"saved":"名","params":{...}`（k 按模板序，值经
    `json_escape`；gate-rejected 等失败路径同样携带）；存档 slug 增第三来源：saved 查询
    名优先于 `table_slug`；存档文件头 `# ` 元信息带模板名与参数。
-10. **退出码**：参数/用法错=1、闸门拒绝=2、连接执行=3，不新增码。
+   **替换前失败也记审计（builder check 裁决）**：查询名不存在、缺参/多参/重复参数、
+   值含 `'`/`\` 等 param 校验拦截，outcome 用新类别 `param-error`（与 gate-rejected
+   同为「被拦下的尝试」，存证对称，红线 4 精神）；sql 字段记模板原文（查询不存在时
+   留空）；cmd_log 的 `--outcome` 词表与 log_usage 同步补该类别。
+10. **退出码**：参数/用法错=1、闸门拒绝=2、连接执行=3，不新增码（param-error 归 1）。
 11. **文档**：SKILL.md 增 `q` 机制说明（只写机制不写具体查询名，红线 6）、
     README.md / README.zh-CN.md 双语同步、CHANGELOG 记 `[Unreleased]`。
 
 ## 留给实现者
+
+- 实现基点为本地 master（2488703，含 like_slug 链与 like_pattern_literal 等 7 个提交）；
+  功能分支一律基于它，与推送时机无关（推送属发版动作）。
 
 - 模块划分：建议 `src/saved_query.rs`（模板加载/解析/替换/哑参预检，纯函数便于单测）+
   `src/cmd_q.rs`（子命令执行，遵循 cmd_*.rs 模式）；解析在 `cli.rs`（`QCmd` enum）。
