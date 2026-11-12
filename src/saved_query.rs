@@ -137,6 +137,9 @@ pub fn substitute(template: &str, params: &[(String, String)]) -> Result<String,
                 ));
             }
             let Some((_, value)) = params.iter().find(|(k, _)| *k == name) else {
+                // 括号转义说明：`{{{{`×2 段渲染两个字面 `{`，`{name}` 内插变量，
+                // `}}}}`×2 段渲染两个字面 `}`——5+5 恰好渲染出 `{{实际名}}`；
+                // 减到 4+4 会把 name 当纯字面文本、丢失具体占位符名。
                 return Err(format!("占位符 {{{{{name}}}}} 没有对应的参数值"));
             };
             out.push_str(value);
@@ -242,11 +245,19 @@ pub fn match_params(
 
 /// 把按模板序排列的参数渲染为紧凑 JSON 对象文本：`{"id":"123"}`，无参数为 `{}`。
 ///
-/// 占位符名字符集受限无需转义；值经 [`crate::audit::json_escape`]。
+/// 键与值均经 [`crate::audit::json_escape`]：值含引号/反斜杠会破坏 JSON 结构；
+/// 键在 [`params_json_loose`] 路径是调用方原始输入（不受占位符字符集约束），
+/// 原样内插会让审计行非法 JSON、被 `roq log` 静默丢弃。
 fn params_json_text(params: &[(String, String)]) -> String {
     let pairs: Vec<String> = params
         .iter()
-        .map(|(k, v)| format!("\"{k}\":\"{}\"", crate::audit::json_escape(v)))
+        .map(|(k, v)| {
+            format!(
+                "\"{}\":\"{}\"",
+                crate::audit::json_escape(k),
+                crate::audit::json_escape(v)
+            )
+        })
         .collect();
     format!("{{{}}}", pairs.join(","))
 }
@@ -434,8 +445,8 @@ mod tests {
 
     #[test]
     fn extract_placeholder_names_rejects_malformed() {
-        // 四类坏模板：未闭合、名含空格、名含非法字符、空名
-        for bad in ["{{", "{{ a}}", "{{a-b}}", "{{}}"] {
+        // 六类坏模板：模板尾 `{{` 悬挂、名含空格、名含非法字符、空名、单闭 `}`、邻位假开
+        for bad in ["{{", "{{ a}}", "{{a-b}}", "{{}}", "{{a}", "x{y{{z"] {
             let err = extract_placeholder_names(bad).expect_err("坏模板应报错");
             assert!(err.contains("第"), "报错应含位置描述：{err}");
         }
@@ -608,6 +619,16 @@ mod tests {
         );
         assert_eq!(params_json_loose(&["=v".to_string()]), "{}");
         assert_eq!(params_json_loose(&[]), "{}");
+        // 键是调用方原始输入，含引号/反斜杠必须转义——否则审计行非法 JSON，
+        // roq log 解析失败静默丢弃，被拦尝试留痕失效
+        assert_eq!(
+            params_json_loose(&["a\"b=2026".to_string()]),
+            "{\"a\\\"b\":\"2026\"}"
+        );
+        assert_eq!(
+            params_json_loose(&["a\\b=2026".to_string()]),
+            "{\"a\\\\b\":\"2026\"}"
+        );
     }
 
     // —— queries.d 文件层：模板的写入、读取与列举 ——

@@ -15,8 +15,8 @@ use roq::config::{load_config_sources, print_profiles};
 use roq::gate::gate;
 use roq::query;
 use roq::saved_query::{
-    load_template, params_json_loose, prepare_execution, saved_audit_extra, SavedContext,
-    QUERY_FILE_HEADER,
+    load_template, params_json_loose, prepare_execution, saved_audit_extra, validate_query_name,
+    SavedContext, QUERY_FILE_HEADER,
 };
 
 /// 退出码：0 成功；1 用法/配置错误；2 语句被闸门拒绝；3 连接/执行错误。
@@ -101,13 +101,15 @@ fn run_query(cli: Cli) -> ExitCode {
     query::execute(&cli, profile, &sql, None)
 }
 
-/// 保存查询执行链路（`roq q <名> [k=v ...]`）：顺序镜像 run_query——配置 → 模板 →
-/// 参数替换 → 只读闸门 → profile 查找。闸门作用于参数替换后的 SQL（保存 ≠ 永久放行，
+/// 保存查询执行链路（`roq q <名> [k=v ...]`）：顺序镜像 run_query——配置 → 名校验 →
+/// 模板 → 参数替换 → 只读闸门 → profile 查找。闸门作用于参数替换后的 SQL（保存 ≠ 永久放行，
 /// 红线 5），每条失败路径的审计都带 saved 上下文，reason 恒居 extra 尾部：
+/// - 查询名非法 → param-error（sql=""，extra=saved+reason）——与 cmd_q 管理面同守
+///   [`validate_query_name`] 一门，防 `../` 等路径逃逸名直触文件系统
 /// - 查询名不存在 → param-error（sql=""，extra=saved+reason）
 /// - 参数替换失败 → param-error（sql=模板原文，extra=saved+params+reason）
 /// - 闸门拒绝     → gate-rejected（sql=替换后 SQL，extra=saved+params+reason），exit 2
-/// - profile 不存在 → config-error（sql=规范化 SQL，extra=saved+params）
+/// - profile 不存在 → config-error（sql=规范化 SQL，extra=saved+params+reason）
 fn run_saved_query(name: &str, param_args: &[String], cli: Cli) -> ExitCode {
     let profiles = match load_config_sources(cli.config.as_ref()) {
         Ok(profiles) => profiles,
@@ -122,6 +124,13 @@ fn run_saved_query(name: &str, param_args: &[String], cli: Cli) -> ExitCode {
             &cli.profile, "", sql, 0, false, 0, outcome, extra, "",
         ));
     };
+    // 名校验先于任何文件系统触达：cmd_q 的 show/remove 依赖同一道门挡 `../` 逃逸，
+    // 执行面（本函数）此前直调 load_template 漏了这层。
+    if let Err(reason) = validate_query_name(name) {
+        eprintln!("[roq] {}", reason);
+        audit_failure("", "param-error", &saved_audit_extra(name, "{}", Some(&reason)));
+        return ExitCode::from(EXIT_USAGE);
+    }
     let template = match load_template(name) {
         Ok(template) => template,
         Err(reason) => {
@@ -172,7 +181,7 @@ fn run_saved_query(name: &str, param_args: &[String], cli: Cli) -> ExitCode {
             false,
             start.elapsed().as_millis(),
             "config-error",
-            &saved_audit_extra(&ctx.name, &ctx.params_json, None),
+            &saved_audit_extra(&ctx.name, &ctx.params_json, Some("profile-missing")),
             "",
         ));
         return ExitCode::from(EXIT_USAGE);
