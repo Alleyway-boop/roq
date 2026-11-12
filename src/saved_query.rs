@@ -1,4 +1,6 @@
-//! 保存查询（roq q）的纯函数层：查询名校验、占位符提取与单遍替换引擎，无任何 I/O。
+//! 保存查询（roq q）的功能层：查询名校验、占位符提取与单遍替换引擎为纯函数；
+//! 末尾的文件层负责 queries.d 目录下模板的写入、读取与列举（薄 I/O 封装，
+//! 名字合法性与重名覆盖等校验属管理子命令流程）。
 //!
 //! [`validate_query_name`] 约束保存名可安全用作文件名与 CLI 参数：
 //! 非空、仅 `[A-Za-z0-9_-]`、不以 `-` 开头（防被误认为 flag）、
@@ -8,6 +10,10 @@
 //! 一律报错并附位置描述（fail-closed）。
 //! [`substitute`] 做 `{{名}}` 宏替换：单遍扫描，值只拼接不回扫，
 //! 产物残留 `{{` 一律报错（宏注入防线）。
+
+use crate::config::{default_config_base, write_file_atomic};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// 保存名保留字：roq 既有子命令与 q 族管理子命令，保存名不得占用，
 /// 避免 `roq q show` 之类的调用无法区分"跑名为 show 的查询"与"列出查询"。
@@ -264,6 +270,101 @@ pub fn prepare_execution(
     Ok((sql, params_json_text(&ordered)))
 }
 
+// —— queries.d 文件层：模板的写入、读取与列举（薄 I/O 封装）——
+
+/// 摘要最大字符数（按 Unicode 字符计，非字节）：列表展示用，超长截断补省略号。
+const TEMPLATE_SUMMARY_MAX_CHARS: usize = 48;
+/// 摘要截断后追加的省略号。
+const TEMPLATE_SUMMARY_ELLIPSIS: &str = "…";
+/// 模板无有效摘要行（空文件/纯注释）时展示的占位文本。
+const TEMPLATE_SUMMARY_EMPTY: &str = "(空)";
+
+/// 保存查询文件头注释：写入时置顶，向手工编辑者说明格式与占位符语法；
+/// 执行时作为 SQL 行注释对语义无害。
+pub const QUERY_FILE_HEADER: &str =
+    "-- roq 保存查询（可手工编辑，修改即时生效；{{名}} 为占位符）\n";
+
+/// 保存查询目录：`~/.roq/queries.d`，一个查询一个 `.sql` 文件（文件名 stem 即查询名）。
+pub fn queries_dir() -> Result<PathBuf, String> {
+    Ok(default_config_base()?.join("queries.d"))
+}
+
+/// 保存查询文件路径：`<base>/<name>.sql`。
+fn query_file_path(base: &Path, name: &str) -> PathBuf {
+    base.join(format!("{name}.sql"))
+}
+
+/// 读取保存查询模板原文（含文件头注释；`--` 行注释对 SQL 语义无害）。
+///
+/// 查询不存在报错并指引 `roq q list`——与列举的"目录不存在返回空"相反：
+/// 读取是点名行为，查无此名就是错误。
+pub fn load_template_in(base: &Path, name: &str) -> Result<String, String> {
+    let path = query_file_path(base, name);
+    fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("保存查询 {name} 不存在：运行 roq q list 查看已保存的查询")
+        } else {
+            format!("读取保存查询 {} 失败：{e}", path.display())
+        }
+    })
+}
+
+/// 从默认目录读取保存查询模板（生产入口；测试用 [`load_template_in`] 注入目录）。
+pub fn load_template(name: &str) -> Result<String, String> {
+    load_template_in(&queries_dir()?, name)
+}
+
+/// 列举全部保存查询：读 `<base>/*.sql`，返回 `(查询名, 摘要)` 按名字典序。
+/// 目录不存在返回空列表——空态是正常态（尚未保存过任何查询）。
+pub fn list_queries_in(base: &Path) -> Result<Vec<(String, String)>, String> {
+    if !base.exists() {
+        return Ok(Vec::new());
+    }
+    let mut queries = Vec::new();
+    for entry in fs::read_dir(base).map_err(|e| format!("读取目录 {} 失败：{e}", base.display()))?
+    {
+        let entry = entry.map_err(|e| format!("读取目录 {} 失败：{e}", base.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sql") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("读取保存查询 {} 失败：{e}", path.display()))?;
+        queries.push((name.to_string(), template_summary(&content)));
+    }
+    queries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(queries)
+}
+
+/// 写入保存查询模板：自动建目录、原子写（临时文件改名），内容 = [`QUERY_FILE_HEADER`] + 模板，
+/// 返回写入路径。本层不做任何校验——名字合法性、重名覆盖防护属 add 流程（管理子命令）。
+pub fn write_template_in(base: &Path, name: &str, template: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(base).map_err(|e| format!("创建目录 {} 失败：{e}", base.display()))?;
+    let path = query_file_path(base, name);
+    write_file_atomic(&path, &format!("{QUERY_FILE_HEADER}{template}"))?;
+    Ok(path)
+}
+
+/// 从模板原文提取摘要行：首个 trim 后非空且不以 `--`/`#` 开头的行，
+/// 超过 [`TEMPLATE_SUMMARY_MAX_CHARS`] 字符截断补省略号；无有效行返回 [`TEMPLATE_SUMMARY_EMPTY`]。
+pub fn template_summary(content: &str) -> String {
+    let Some(line) = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("--") && !line.starts_with('#'))
+    else {
+        return TEMPLATE_SUMMARY_EMPTY.to_string();
+    };
+    if line.chars().count() <= TEMPLATE_SUMMARY_MAX_CHARS {
+        return line.to_string();
+    }
+    let truncated: String = line.chars().take(TEMPLATE_SUMMARY_MAX_CHARS).collect();
+    format!("{truncated}{TEMPLATE_SUMMARY_ELLIPSIS}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +540,79 @@ mod tests {
                 .expect("编排应成功");
         assert_eq!(sql, "SELECT * FROM t WHERE id='5'");
         assert_eq!(params_json, "{\"id\":\"5\"}");
+    }
+
+    // —— queries.d 文件层：模板的写入、读取与列举 ——
+
+    fn temp_qdir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("roq-q-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn write_then_load_roundtrips_with_header() {
+        let base = temp_qdir("roundtrip");
+        let _ = fs::remove_dir_all(&base);
+        let template = "SELECT * FROM t WHERE id='{{id}}'";
+        let path = write_template_in(&base, "by-id", template).expect("写入保存查询应成功");
+        assert_eq!(path, base.join("by-id.sql"));
+        let text = load_template_in(&base, "by-id").expect("回读保存查询应成功");
+        assert_eq!(text, format!("{QUERY_FILE_HEADER}{template}"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn load_missing_query_errors_with_list_hint() {
+        let base = temp_qdir("missing");
+        let _ = fs::remove_dir_all(&base);
+        let err = load_template_in(&base, "no-such").expect_err("查询不存在应报错");
+        assert!(
+            err.contains("roq q list"),
+            "报错应含 roq q list 指引：{err}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_queries_sorted_and_summarized() {
+        let base = temp_qdir("list");
+        let _ = fs::remove_dir_all(&base);
+        // 目录不存在是正常空态（尚未保存过任何查询）
+        assert_eq!(
+            list_queries_in(&base).expect("目录不存在应返回空列表"),
+            vec![]
+        );
+        fs::create_dir_all(&base).expect("创建临时目录应成功");
+        assert_eq!(list_queries_in(&base).expect("空目录应返回空列表"), vec![]);
+        write_template_in(&base, "beta", "-- 模板自带注释\nSELECT 2").expect("写入 beta 应成功");
+        write_template_in(&base, "alpha", "SELECT 1").expect("写入 alpha 应成功");
+        // 非 .sql 文件不入列
+        fs::write(base.join("notes.txt"), "SELECT 9").expect("写入 notes.txt 应成功");
+        assert_eq!(
+            list_queries_in(&base).expect("列举应成功"),
+            vec![
+                ("alpha".to_string(), "SELECT 1".to_string()),
+                ("beta".to_string(), "SELECT 2".to_string()),
+            ]
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn template_summary_skips_comments_and_truncates() {
+        // 摘要取首个 trim 后非空且不以 --/# 开头的行
+        assert_eq!(template_summary("  \n-- 头注释\nSELECT 1"), "SELECT 1");
+        assert_eq!(
+            template_summary("# shell 风格注释\n  SELECT 2  "),
+            "SELECT 2"
+        );
+        assert_eq!(template_summary("-- 纯注释\n# 也是注释"), "(空)");
+        assert_eq!(template_summary(""), "(空)");
+        // 恰 48 字符不补省略号；超限按字符截断补省略号
+        let full48: String = "x".repeat(48);
+        assert_eq!(template_summary(&full48), full48);
+        let long: String = "x".repeat(60);
+        assert_eq!(template_summary(&long), format!("{}…", "x".repeat(48)));
+        let zh: String = "查".repeat(60);
+        assert_eq!(template_summary(&zh), format!("{}…", "查".repeat(48)));
     }
 }
