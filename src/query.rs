@@ -16,6 +16,7 @@ use crate::render::{
     is_show_create, raw_cell, render_csv, render_json, terminal_max_cell, truncate_cell, tsv_cell,
     CellValue, OutputFormat,
 };
+use crate::saved_query::{saved_audit_extra, SavedContext};
 
 /// 连接超时（秒）。
 const CONNECT_TIMEOUT_SECS: u64 = 8;
@@ -85,7 +86,14 @@ pub fn connect_readonly(
 }
 
 /// 执行一条已过闸门的查询。所有退出路径（含失败）都会写审计日志。
-pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
+/// `saved` 非 None（保存查询执行）时：审计 extra 带 saved 上下文（reason 恒居尾部）、
+/// 存档文件头附保存名与参数、stderr 摘要尾注模板名。
+pub fn execute(
+    cli: &Cli,
+    profile: &Profile,
+    sql: &str,
+    saved: Option<&SavedContext>,
+) -> ExitCode {
     // --quiet 只抑制提示（prod 提醒/耗时统计等）；错误信息与退出码契约不受影响。
     let notice = |msg: String| {
         if !cli.quiet {
@@ -107,10 +115,17 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
                     result_file: &str,
                     code: u8|
      -> ExitCode {
+        // extra = saved 片段（若有）+ reason（若有）——saved_audit_extra 保证 reason 恒居尾部。
+        let saved_fragment = saved
+            .map(|ctx| saved_audit_extra(&ctx.name, &ctx.params_json, None))
+            .unwrap_or_default();
         let extra = if reason.is_empty() {
-            String::new()
+            saved_fragment
         } else {
-            format!(",\"reason\":\"{}\"", json_escape(reason))
+            format!(
+                "{saved_fragment},\"reason\":\"{}\"",
+                json_escape(reason)
+            )
         };
         append_audit_log(&audit_line(
             &cli.profile,
@@ -190,8 +205,15 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
                 eprintln!("[roq] 读取行失败：{}", e);
                 let partial = match &out_path {
                     Some(path) => path.clone(),
-                    None => save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
-                        .unwrap_or_default(),
+                    None => save_result(
+                        &cli.profile,
+                        sql,
+                        &profile.database,
+                        cli.max_rows,
+                        &lines,
+                        saved,
+                    )
+                    .unwrap_or_default(),
                 };
                 return log_exit(
                     "exec-error",
@@ -253,8 +275,15 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     // --out 替代自动存档（文件已是全量结果），审计 result 记该路径。
     let result_file = match &out_path {
         Some(path) => path.clone(),
-        None => save_result(&cli.profile, sql, &profile.database, cli.max_rows, &lines)
-            .unwrap_or_default(),
+        None => save_result(
+            &cli.profile,
+            sql,
+            &profile.database,
+            cli.max_rows,
+            &lines,
+            saved,
+        )
+        .unwrap_or_default(),
     };
     // 单格截断原本只有省略号暗示；明示并指路全量所在（提示在前，摘要收尾）。
     // --out 与 json/csv 模式不截断，此标志不会置位。
@@ -265,8 +294,12 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
             if result_file.is_empty() { "失败" } else { &result_file }
         ));
     }
+    // 保存查询时摘要尾注模板名，便于对照 ~/.roq/queries.d 里的定义（--quiet 仍抑制整行）。
+    let saved_note = saved
+        .map(|ctx| format!("（模板 {}）", ctx.name))
+        .unwrap_or_default();
     notice(format!(
-        "[roq] profile={} db={} 行数={}{} 耗时={}ms（会话只读）存档={}",
+        "[roq] profile={} db={} 行数={}{} 耗时={}ms（会话只读）存档={}{saved_note}",
         cli.profile,
         profile.database,
         rows_out,

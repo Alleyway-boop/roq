@@ -313,7 +313,7 @@ fn log_usage() -> String {
         "  --month     看本月全部".to_string(),
         "  --last N    最近 N 条（不限日期）".to_string(),
         "  --profile   按配置名过滤".to_string(),
-        "  --outcome   按结果过滤：ok / gate-rejected / connect-error / exec-error / config-error"
+        "  --outcome   按结果过滤：ok / param-error / gate-rejected / connect-error / exec-error / config-error"
             .to_string(),
         "  --json      原样输出匹配的 JSONL 行".to_string(),
     ]

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::config::{default_config_base, home_dir};
 use crate::render::{like_slug, table_slug};
+use crate::saved_query::SavedContext;
 
 /// 本地时间戳（ISO 8601 含毫秒与时区）。
 fn now_local() -> String {
@@ -83,8 +84,69 @@ pub fn append_audit_log(entry: &str) {
     }
 }
 
-/// 查询结果全文存档：<当前项目>\.roq\results\YYYYMMDD\HHMMSS-毫秒-<表名>-<profile>.tsv
-/// 文件头为 "# " 元信息块（时间/库/行数上限/SQL），TSV 体从首个非 # 行开始；
+/// 存档文件名 slug：saved 查询直接用保存名（存的是模板展开结果，表名提炼已失真），
+/// 普通查询走既有链 table_slug → like_slug → "query"。
+pub fn result_slug(sql: &str, saved: Option<&str>) -> String {
+    if let Some(name) = saved {
+        return name.to_string();
+    }
+    table_slug(sql)
+        .or_else(|| like_slug(sql))
+        .unwrap_or_else(|| "query".to_string())
+}
+
+/// 从 params_json（`{"k":"v",...}`，值已 json_escape）提取 `# 参数:` 行的 `k=v, k=v` 文本。
+/// 键限占位符字符集无需转义；切分引号感知（值内的逗号/转义引号不误切），
+/// 值保持 json 转义形态；无参数或形坏返回 None——调用方据此省略参数行。
+fn saved_params_text(params_json: &str) -> Option<String> {
+    let inner = params_json.strip_prefix('{')?.strip_suffix('}')?;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut pairs: Vec<String> = Vec::new();
+    let mut pair = String::new();
+    for c in inner.chars() {
+        if escaped {
+            pair.push(c);
+            escaped = false;
+        } else {
+            match c {
+                '\\' if in_string => {
+                    pair.push(c);
+                    escaped = true;
+                }
+                '"' => {
+                    in_string = !in_string;
+                    pair.push(c);
+                }
+                ',' if !in_string => pairs.push(std::mem::take(&mut pair)),
+                _ => pair.push(c),
+            }
+        }
+    }
+    if !pair.is_empty() {
+        pairs.push(pair);
+    }
+    let rendered: Vec<String> = pairs
+        .iter()
+        .filter_map(|p| {
+            let (key, value) = p.split_once(':')?;
+            Some(format!(
+                "{}={}",
+                key.trim_matches('"'),
+                value.trim_matches('"')
+            ))
+        })
+        .collect();
+    if rendered.is_empty() {
+        return None;
+    }
+    Some(rendered.join(", "))
+}
+
+/// 查询结果全文存档：<当前项目>\.roq\results\YYYYMMDD\HHMMSS-毫秒-<slug>-<profile>.tsv
+/// （slug：saved 保存名优先，普通查询提炼表名/LIKE 值，兜底 "query"，见 [`result_slug`]）
+/// 文件头为 "# " 元信息块（时间/库/行数上限/SQL，saved 查询另附保存名与参数），
+/// TSV 体从首个非 # 行开始；
 /// 单元格不截断（终端展示才截断）。当前目录是家目录或不可写时退回 ~/.roq/results/。
 /// 返回路径；失败返回 None（仅影响存档，不影响查询结果输出）。
 pub fn save_result(
@@ -93,6 +155,7 @@ pub fn save_result(
     db: &str,
     max_rows: usize,
     lines: &[String],
+    saved: Option<&SavedContext>,
 ) -> Option<String> {
     let day = chrono::Local::now().format("%Y%m%d").to_string();
     let stamp = chrono::Local::now().format("%H%M%S-%3f").to_string();
@@ -112,15 +175,19 @@ pub fn save_result(
         if fs::create_dir_all(&dir).is_err() {
             continue;
         }
-        let slug = table_slug(sql)
-            .or_else(|| like_slug(sql))
-            .unwrap_or_else(|| "query".to_string());
+        let slug = result_slug(sql, saved.map(|ctx| ctx.name.as_str()));
         let path = dir.join(format!("{}-{}-{}.tsv", stamp, slug, profile));
         let mut body = String::new();
         body.push_str(&format!("# 时间: {}\n", now_local()));
         body.push_str(&format!("# 库: {}（profile={}）\n", db, profile));
         body.push_str(&format!("# 行数上限: {}\n", max_rows));
         body.push_str(&format!("# SQL: {}\n", sql.replace('\n', " ")));
+        if let Some(ctx) = saved {
+            body.push_str(&format!("# 保存查询: {}\n", ctx.name));
+            if let Some(params) = saved_params_text(&ctx.params_json) {
+                body.push_str(&format!("# 参数: {params}\n"));
+            }
+        }
         body.push_str(&lines.join("\n"));
         if fs::write(&path, format!("{}\n", body)).is_ok() {
             return Some(path.display().to_string());
@@ -131,7 +198,7 @@ pub fn save_result(
 
 #[cfg(test)]
 mod tests {
-    use super::json_escape;
+    use super::*;
 
     #[test]
     fn json_escape_covers_controls_and_quotes() {
@@ -139,5 +206,37 @@ mod tests {
         assert_eq!(json_escape("\n\t\r"), "\\n\\t\\r");
         assert_eq!(json_escape("\u{1}"), "\\u0001");
         assert_eq!(json_escape("中文保持原样"), "中文保持原样");
+    }
+
+    #[test]
+    fn result_slug_prefers_saved_name() {
+        assert_eq!(
+            result_slug("SELECT * FROM t_user", Some("q-by-id")),
+            "q-by-id",
+            "saved 查询的存档名应直接用保存名，不做表名提炼"
+        );
+    }
+
+    #[test]
+    fn result_slug_falls_back_to_table_then_query() {
+        assert_eq!(result_slug("SELECT * FROM t_user", None), "t_user");
+        assert_eq!(result_slug("SELECT 1", None), "query");
+    }
+
+    #[test]
+    fn saved_params_text_renders_k_v_pairs() {
+        assert_eq!(saved_params_text("{\"id\":\"5\"}").as_deref(), Some("id=5"));
+        // 值内逗号/转义引号不得切分参数对（引号感知扫描；值保持 json 转义形态）
+        assert_eq!(
+            saved_params_text("{\"id\":\"5\",\"note\":\"a,b\"}").as_deref(),
+            Some("id=5, note=a,b")
+        );
+        assert_eq!(
+            saved_params_text("{\"q\":\"a\\\"b\"}").as_deref(),
+            Some("q=a\\\"b")
+        );
+        // 无参数（"{}"）与形坏输入返回 None——调用方据此省略参数行
+        assert_eq!(saved_params_text("{}"), None);
+        assert_eq!(saved_params_text("not-json"), None);
     }
 }

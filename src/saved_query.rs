@@ -1,4 +1,5 @@
 //! 保存查询（roq q）的功能层：查询名校验、占位符提取与单遍替换引擎为纯函数；
+//! 另有执行链路失败路径共用的审计片段组装（[`saved_audit_extra`] / [`params_json_loose`]）；
 //! 末尾的文件层负责 queries.d 目录下模板的写入、读取与列举（薄 I/O 封装，
 //! 名字合法性与重名覆盖等校验属管理子命令流程）。
 //!
@@ -268,6 +269,38 @@ pub fn prepare_execution(
     }
     let sql = substitute(template, &ordered)?;
     Ok((sql, params_json_text(&ordered)))
+}
+
+/// 失败路径审计用：宽松渲染调用方原始 `k=v` 参数为 params_json 形态（`{"k":"v"}`）。
+///
+/// [`prepare_execution`] 失败时拿不到对齐后的规范参数，此函数尽力保留可解析的
+/// 参数（含重复——重参本身就是要审计的场景），坏形参数（缺 `=`、空键值）跳过；
+/// 仅用于审计 extra，不是执行数据路径。
+pub fn params_json_loose(param_args: &[String]) -> String {
+    let pairs: Vec<(String, String)> = param_args
+        .iter()
+        .filter_map(|arg| parse_param_arg(arg).ok())
+        .collect();
+    params_json_text(&pairs)
+}
+
+/// 组装 saved 查询的审计 extra 片段：`,"saved":"名","params":{...}` + 可选尾部 `,"reason":"..."`。
+///
+/// 形态契约：无参数（params_json 为 `{}`）省略 params 键；reason 恒居 extra 尾部。
+/// 名与 reason 经 [`crate::audit::json_escape`]；params_json 由 [`prepare_execution`]
+/// 生成、值已转义，原样嵌入。
+pub fn saved_audit_extra(name: &str, params_json: &str, reason: Option<&str>) -> String {
+    let mut extra = format!(",\"saved\":\"{}\"", crate::audit::json_escape(name));
+    if params_json != "{}" {
+        extra.push_str(&format!(",\"params\":{params_json}"));
+    }
+    if let Some(reason) = reason {
+        extra.push_str(&format!(
+            ",\"reason\":\"{}\"",
+            crate::audit::json_escape(reason)
+        ));
+    }
+    extra
 }
 
 // —— queries.d 文件层：模板的写入、读取与列举（薄 I/O 封装）——
@@ -540,6 +573,41 @@ mod tests {
                 .expect("编排应成功");
         assert_eq!(sql, "SELECT * FROM t WHERE id='5'");
         assert_eq!(params_json, "{\"id\":\"5\"}");
+    }
+
+    // —— 审计片段组装（执行链路失败路径共用）——
+
+    #[test]
+    fn saved_audit_extra_shapes_json() {
+        // 形态一：含 params、无 reason
+        assert_eq!(
+            saved_audit_extra("q-by-id", "{\"id\":\"5\"}", None),
+            ",\"saved\":\"q-by-id\",\"params\":{\"id\":\"5\"}"
+        );
+        // 形态二：无参数（params_json 为 "{}"）省略 params 键
+        assert_eq!(saved_audit_extra("plain", "{}", None), ",\"saved\":\"plain\"");
+        // 形态三：含 reason——reason 恒居 extra 尾部
+        assert_eq!(
+            saved_audit_extra("q-by-id", "{\"id\":\"5\"}", Some("缺少参数 b")),
+            ",\"saved\":\"q-by-id\",\"params\":{\"id\":\"5\"},\"reason\":\"缺少参数 b\""
+        );
+        // 引号值转义：reason 内的引号不得破坏 JSON 结构
+        assert_eq!(
+            saved_audit_extra("q", "{}", Some("值含 \"引号\"")),
+            ",\"saved\":\"q\",\"reason\":\"值含 \\\"引号\\\"\""
+        );
+    }
+
+    #[test]
+    fn params_json_loose_keeps_parseable_args() {
+        // 失败路径审计的宽松渲染：可解析的 k=v 原样保留（含重复——重参本身是要审计的场景），
+        // 坏形参数跳过；全不可解析回落 "{}"
+        assert_eq!(
+            params_json_loose(&["id=5".to_string(), "bad".to_string(), "id=6".to_string()]),
+            "{\"id\":\"5\",\"id\":\"6\"}"
+        );
+        assert_eq!(params_json_loose(&["=v".to_string()]), "{}");
+        assert_eq!(params_json_loose(&[]), "{}");
     }
 
     // —— queries.d 文件层：模板的写入、读取与列举 ——
