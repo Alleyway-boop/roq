@@ -53,10 +53,10 @@ stderr 尾行有审计摘要（profile、库、行数、耗时、"会话只读"�
 把反复使用的查询存为命名模板，之后一条短命令带参执行；子命令细节见 `roq q --help`。
 
 - 保存：`roq q add <名> "SQL模板"`，模板里 `{{名}}` 是占位符；`q list` 列举（名 + 模板首行）、`q show <名>` 原样看模板、`q remove <名> --yes` 删除；同名重录加 `--update`（缺省拒绝覆盖）
-- 执行：`roq q <名> k=v ...`，k 按占位符名对应填入，缺参/多参/重参一律报错；值不得含 `'` 或 `\`（占位符是宏替换而非绑定参数，这两类字符会改变 SQL 语义；需要时改写模板并在其中用 `''` 转义）；`--profile`/`--format` 等查询 flag 照常跟在后面
-- 存储：`~/.roq/queries.d/<名>.sql`，一查询一文件；文件头 `--` 注释行是说明文字，正文可手工编辑、改后即时生效；查询名限字母/数字/下划线/连字符，不得占用子命令保留名（config/log/skill/diff/tables/schema/columns/explain/q/add/list/show/remove/help）
+- 执行：`roq q <名> k=v ...`，k 按占位符名对应填入，缺参/多参/重参一律报错；值不得含 `'` 或 `\`（占位符是宏替换而非绑定参数，这两类字符会改变 SQL 语义；需要时改写模板：`'` 写作 `''`、`\` 写作 `\\`）；`--profile`/`--format` 等查询 flag 照常跟在后面
+- 存储：`~/.roq/queries.d/<名>.sql`，一查询一文件；文件头 `--` 注释行是说明文字，正文可手工编辑、改后即时生效；查询名限字母/数字/下划线/连字符、不以 `-` 开头，不得占用子命令保留名（config/log/skill/diff/tables/schema/columns/explain/q/add/list/show/remove/help）
 - 安全语义：保存时占位符换哑值预检过只读闸门（静态禁词在保存时即暴露）；执行时替换后的 SQL 再全量过闸门——**保存 ≠ 永久放行**，闸门规则演进后存量查询同样可能被拒（exit=2，按提示改模板）
-- 审计：触网前的失败（查询不存在/参数错误）记 `param-error`，`roq log --outcome param-error` 可筛；保存查询的审计行带 `saved`/`params` 字段；存档文件名用查询名，文件头附模板名与当次参数
+- 审计：触网前的失败（查询不存在/参数错误）记 `param-error`，`roq log --outcome param-error` 可筛；保存查询的审计行带 `saved` 字段、有参时另带 `params`；存档文件名用查询名，文件头附模板名与当次参数
 
 ```bash
 # 保存：计数模板，两个占位符

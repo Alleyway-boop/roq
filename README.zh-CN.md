@@ -141,14 +141,14 @@ roq q remove cnt-by-day --yes
 ```
 
 - 模板存于 `~/.roq/queries.d/<名>.sql`，一查询一文件。文件头是 `--` 注释说明；其余为 SQL 模板，
-  可手工编辑、改后即时生效。查询名仅限字母、数字、`_`、`-`，不得占用子命令保留名
+  可手工编辑、改后即时生效。查询名仅限字母、数字、`_`、`-`，不以 `-` 开头，不得占用子命令保留名
   （`config`、`log`、`q`、`add` 等）；同名重录须加 `--update`。
 - 替换是宏替换而非绑定参数：缺参/多参/重参一律报错，值不得含 `'` 或 `\`——两者都会改变 SQL
-  语义；需要表示这类字符时，改写模板并在其中用 `''` 转义。
+  语义；需要表示这类字符时改写模板：`'` 写作 `''`、`\` 写作 `\\`。
 - **保存 ≠ 永久放行。** 保存时模板以哑参预检过只读闸门，静态违规提前暴露；执行时替换后的 SQL
   再次全量过闸门——闸门规则演进后，过去能过的存量查询同样可能被拒。
 - 触网前的失败（查询不存在、参数错误）以 `param-error` 结果类别留审计。保存查询的审计行带
-  `saved` / `params` 字段；存档文件名用查询名，文件头记录查询名与当次参数。
+  `saved` 字段、有参时另带 `params`；存档文件名用查询名，文件头记录查询名与当次参数。
 
 ## 连接配置
 
@@ -231,7 +231,7 @@ ssl=true             ; 可选：TLS 加密（不校验证书）
 
 - **审计日志**：`~/.roq/logs/roq-YYYYMM.jsonl`，每次调用一行 JSON：
   `ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`。`outcome` 含
-  `ok`、`param-error`（保存查询参数替换失败，含原因）、`gate-rejected`（含拒绝原因）、
+  `ok`、`param-error`（保存查询不存在或参数替换失败，含原因）、`gate-rejected`（含拒绝原因）、
   `connect-error`、`exec-error`、`config-error`——被拒的尝试同样留痕。用 `roq log` 查询
   （默认今天；`--month` / `--last N` 扩大范围）。
 - **结果存档**：当前项目目录 `.roq/results/YYYYMMDD/HHMMSS-毫秒-<表名>-<profile>.tsv`（非项目

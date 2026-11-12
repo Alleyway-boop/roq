@@ -175,7 +175,7 @@ pub fn dummy_substitute(template: &str) -> Result<String, String> {
 pub fn validate_param_value(name: &str, value: &str) -> Result<(), String> {
     if value.contains('\'') || value.contains('\\') {
         return Err(format!(
-            "参数 {name} 的值含单引号或反斜杠，直接替换会改变 SQL 语义；如需在查询中表示此类字符，请改写模板并在其中用 '' 转义"
+            "参数 {name} 的值含单引号或反斜杠，直接替换会改变 SQL 语义；如需在查询中表示此类字符，请改写模板并在其中转义：单引号写作 ''，反斜杠写作 \\\\"
         ));
     }
     Ok(())
@@ -495,10 +495,10 @@ mod tests {
 
     #[test]
     fn validate_param_value_rejects_quote_and_backslash() {
-        for bad in ["O'Brien", "a\\b"] {
-            let err = validate_param_value("k", bad).expect_err("含单引号/反斜杠的值应报错");
-            assert!(err.contains("''"), "报错应提示 '' 转义：{err}");
-        }
+        let err = validate_param_value("k", "O'Brien").expect_err("含单引号的值应报错");
+        assert!(err.contains("''"), "报错应提示单引号写作 ''：{err}");
+        let err = validate_param_value("k", "a\\b").expect_err("含反斜杠的值应报错");
+        assert!(err.contains("\\\\"), "报错应提示反斜杠写作 \\\\：{err}");
         assert_eq!(validate_param_value("k", "a=b"), Ok(()));
         assert_eq!(validate_param_value("k", "a b"), Ok(()));
     }

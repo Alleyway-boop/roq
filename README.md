@@ -164,20 +164,20 @@ roq q remove cnt-by-day --yes
 
 - Templates live in `~/.roq/queries.d/<name>.sql`, one file per query. The file starts with a
   `--` comment header (documentation); the rest is the SQL template — hand-editable, effective
-  immediately. Names are limited to letters, digits, `_`, and `-`, and cannot shadow
-  subcommand names (`config`, `log`, `q`, `add`, …). Re-adding an existing name requires
-  `--update`.
+  immediately. Names are limited to letters, digits, `_`, and `-`, cannot start with `-`, and
+  cannot shadow subcommand names (`config`, `log`, `q`, `add`, …). Re-adding an existing name
+  requires `--update`.
 - Substitution is macro-style text replacement, not bound parameters: missing, extra, or
   duplicate `k=v` arguments are rejected, and values may not contain `'` or `\` — either would
-  change the SQL's meaning. To represent such characters, rewrite the template and escape with
-  `''` inside it.
+  change the SQL's meaning. To represent them, write `''` for a single quote and `\\` for a
+  backslash in the template.
 - **Saving is not a permanent pass.** At save time the template with dummy values passes a gate
   precheck, so static violations surface early; at run time the substituted SQL goes through the
   full gate again — a gate rule change can reject a query that used to pass.
 - Failures before any connection is attempted (unknown query, bad parameters) are audited under
-  the `param-error` outcome. Saved-query audit entries carry `saved` / `params` fields, and the
-  archive file is named after the query, with the query name and parameters recorded in its
-  `# ` header.
+  the `param-error` outcome. Saved-query audit entries carry a `saved` field plus `params` when
+  parameters are given, and the archive file is named after the query, with the query name and
+  parameters recorded in its `# ` header.
 
 ## Connection profiles
 
@@ -275,7 +275,7 @@ Automatic and **cannot be disabled** — this is the tool's ledger of record.
 
 - **Audit log**: `~/.roq/logs/roq-YYYYMM.jsonl`, one JSON line per invocation:
   `ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`. Outcomes include
-  `ok`, `param-error` (saved-query substitution failure, with the reason), `gate-rejected`
+  `ok`, `param-error` (saved-query lookup or substitution failure, with the reason), `gate-rejected`
   (with the rejection reason), `connect-error`, `exec-error`, `config-error` — rejected attempts
   are logged too. Query it with `roq log` (defaults to today; `--month` / `--last N` for wider
   views).

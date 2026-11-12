@@ -19,8 +19,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). V
   re-checks against the full gate on every run.
 - Saved-query preparation failures (unknown query, missing/extra/duplicate parameters, values
   containing `'` or `\`) are audited before any connection under a new `param-error` outcome;
-  audit entries for saved queries carry `saved`/`params` fields, and archive file names and `# `
-  headers note the query name and the parameters used.
+  audit entries for saved queries carry a `saved` field (plus `params` when parameters are
+  given), and archive file names and `# ` headers note the query name and the parameters used.
 - `roq tables` and `roq columns` accept an optional filter pattern: a bare substring is
   auto-wrapped as `%substring%` (`roq tables mark`), while a pattern containing `%` is used
   verbatim for LIKE matching (`roq tables t_report%`); patterns containing a backslash are
