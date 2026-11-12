@@ -28,7 +28,7 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 }
 
-/// 顶层命令：查询（默认）或 config 子命令。
+/// 顶层命令：查询（默认）或各子命令。
 #[derive(Debug)]
 pub enum Command {
     Query(Cli),
@@ -36,6 +36,15 @@ pub enum Command {
     Log(LogArgs),
     Skill(SkillCmd),
     Diff(DiffArgs),
+    /// `roq q` 管理子命令（add/list/show/remove）。
+    Q(QCmd),
+    /// `roq q <名> [k=v ...]`：按名执行保存查询。params 原样透传，
+    /// k=v 形态不在此校验——校验在执行链路（prepare_execution），保证 param-error 可被审计。
+    SavedQuery {
+        name: String,
+        params: Vec<String>,
+        cli: Cli,
+    },
 }
 
 /// `roq diff` 子命令参数：同一条 SQL 在两个 profile 上比对。
@@ -118,6 +127,27 @@ pub enum ConfigCmd {
     },
 }
 
+/// `roq q` 管理子命令集：保存查询的增删查（执行面走 `Command::SavedQuery`）。
+#[derive(Debug)]
+pub enum QCmd {
+    /// 保存模板到 ~/.roq/queries.d/<名>.sql；同名拒绝覆盖（--update 重录），
+    /// 名字合法性、重名防护与模板预检在执行流程（cmd_q）。
+    Add {
+        name: String,
+        template: String,
+        update: bool,
+    },
+    List,
+    Show {
+        name: String,
+    },
+    /// 删除保存查询；--yes 必填（解析层即拒绝，防误删）。
+    Remove {
+        name: String,
+        yes: bool,
+    },
+}
+
 pub fn usage() -> String {
     [
         "roq —— 只读 MySQL 查询工具".to_string(),
@@ -127,6 +157,8 @@ pub fn usage() -> String {
         "      roq schema <表|库.表> [--profile 名 ...]          # SHOW CREATE TABLE 快捷方式".to_string(),
         "      roq columns <表|库.表> [列模式] [--profile 名 ...]  # SHOW FULL COLUMNS（含字段注释，列模式可过滤）".to_string(),
         "      roq explain \"SQL语句\" [--profile 名 ...]          # 自动加 EXPLAIN 前缀".to_string(),
+        "      roq q <名> [k=v ...] [--profile 名 ...]           # 执行保存查询（详情 roq q --help）".to_string(),
+        "      roq q <add|list|show|remove>                      # 保存查询管理（详情 roq q --help）".to_string(),
         "      roq skill install [--global | --project | --codex] [--force]  # 安装 AI 使用技能".to_string(),
         "      roq diff --profile 左 --profile 右 \"SQL\" [--json] [--sample N]   # 同一条 SQL 两库对账比对".to_string(),
         "      roq config <add|test|list|migrate|remove>  # 连接配置管理（roq config --help 看全部）".to_string(),
@@ -148,7 +180,8 @@ pub fn usage() -> String {
     .join("\n")
 }
 
-/// 顶层解析：`config` / `log` / `tables` / `schema` / `explain` 开头走对应子命令，其余走查询。
+/// 顶层解析：`config` / `log` / `skill` / `diff` / `q` / `tables` / `schema` / `columns` /
+/// `explain` 开头走对应子命令，其余走查询。
 /// 快捷子命令只生成 SQL，随后与手写查询走同一条闸门+审计+存档链路。
 pub fn parse_command(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
@@ -156,6 +189,7 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
         Some("log") => Ok(Command::Log(parse_log_cmd(&args[1..])?)),
         Some("skill") => Ok(Command::Skill(parse_skill_cmd(&args[1..])?)),
         Some("diff") => Ok(Command::Diff(parse_diff_cmd(&args[1..])?)),
+        Some("q") => parse_q_cmd(&args[1..]),
         Some("tables") => shortcut_tables(&args[1..]),
         Some("schema") => shortcut_schema(&args[1..]),
         Some("columns") => shortcut_columns(&args[1..]),
@@ -507,6 +541,110 @@ fn parse_skill_cmd(args: &[String]) -> Result<SkillCmd, String> {
         _ => return Err("--global、--project 与 --codex 三选一，一次只装一个目标".to_string()),
     };
     Ok(SkillCmd::Install { target, force })
+}
+
+fn q_usage() -> String {
+    [
+        "roq q —— 保存查询：SQL 模板存为命名文件（{{名}} 占位符），按名填参执行".to_string(),
+        String::new(),
+        "用法:".to_string(),
+        "  roq q <名> [k=v ...] [--profile 名 ...]                # 执行保存查询（查询 flag 共用）"
+            .to_string(),
+        "  roq q add <名> \"SQL模板\" [--update]".to_string(),
+        "  roq q list".to_string(),
+        "  roq q show <名>".to_string(),
+        "  roq q remove <名> --yes".to_string(),
+        String::new(),
+        "  k=v        参数值按占位符名填入模板；值不得含单引号或反斜杠；缺参/多参/重复均报错".to_string(),
+        "  --update   add 同名已存在时覆盖重录（缺省拒绝覆盖）".to_string(),
+        "  --yes      remove 确认删除（必填，防误删）".to_string(),
+        String::new(),
+        "模板存于 ~/.roq/queries.d/<名>.sql，一查询一文件，可手工编辑、改后即时生效；执行时".to_string(),
+        "占位符替换生成 SQL，与手写查询走同一只读闸门与审计链路——保存 ≠ 永久放行。".to_string(),
+    ]
+    .join("\n")
+}
+
+/// `roq q` 解析：首词为管理动词走管理解析；`--help`/`-h`/空回 q 用法；
+/// 其余走执行面（复用查询 flag 集，顺序规则同快捷子命令：q 紧跟 roq，flag 放后面）。
+fn parse_q_cmd(args: &[String]) -> Result<Command, String> {
+    match args.first().map(String::as_str) {
+        None => Err(q_usage()),
+        Some("--help") | Some("-h") => Err(q_usage()),
+        Some(verb @ ("add" | "list" | "show" | "remove")) => parse_q_management(verb, &args[1..]),
+        Some(_) => parse_q_execution(args),
+    }
+}
+
+/// 管理动词解析（add/list/show/remove）：逐词循环、未知参数即报错（config 同款惯例）。
+/// add 的名 = 首个位置参数，模板 = 其余位置参数空格拼接（同 explain 先例）。
+fn parse_q_management(verb: &str, rest: &[String]) -> Result<Command, String> {
+    let mut name: Option<String> = None;
+    let mut template_parts: Vec<String> = Vec::new();
+    let mut update = false;
+    let mut yes = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--help" | "-h" => return Err(q_usage()),
+            "--update" if verb == "add" => update = true,
+            "--yes" if verb == "remove" => yes = true,
+            other if !looks_like_flag(other) => {
+                if verb == "list" {
+                    return Err(format!("q list 不接受额外参数：{}", other));
+                }
+                match verb {
+                    "add" if name.is_none() => name = Some(other.to_string()),
+                    "add" => template_parts.push(other.to_string()),
+                    _ if name.is_none() => name = Some(other.to_string()),
+                    _ => {
+                        return Err(format!(
+                            "q {} 只接受一个查询名，多余参数：{}",
+                            verb, other
+                        ))
+                    }
+                }
+            }
+            other => return Err(format!("无法识别的参数：{}（roq q --help 查看用法）", other)),
+        }
+    }
+    if verb == "list" {
+        return Ok(Command::Q(QCmd::List));
+    }
+    let name = name.ok_or_else(|| format!("q {verb} 需要 <名>"))?;
+    if verb == "add" {
+        let template = template_parts.join(" ");
+        if template.is_empty() {
+            return Err("q add 需要模板：SQL 语句（{{名}} 为占位符）".to_string());
+        }
+        return Ok(Command::Q(QCmd::Add {
+            name,
+            template,
+            update,
+        }));
+    }
+    if verb == "show" {
+        return Ok(Command::Q(QCmd::Show { name }));
+    }
+    // 剩余仅 remove（list 已提前返回）：删除必须显式确认
+    if !yes {
+        return Err(format!("q remove 需 --yes 确认删除：roq q remove {name} --yes"));
+    }
+    Ok(Command::Q(QCmd::Remove { name, yes }))
+}
+
+/// 执行面解析：位置参数首位为查询名，其余原样作为 k=v 参数透传。
+/// 解析层不校验 k=v 形态与查询名——校验在执行链路（prepare_execution），
+/// 保证 param-error 可被审计（被拦尝试同样留痕）。
+fn parse_q_execution(args: &[String]) -> Result<Command, String> {
+    let (cli, positional) = parse_query_parts(args)?;
+    let [name, params @ ..] = positional.as_slice() else {
+        return Err(q_usage());
+    };
+    Ok(Command::SavedQuery {
+        name: name.clone(),
+        params: params.to_vec(),
+        cli,
+    })
 }
 /// 解析查询命令行参数。--help/--version 以 Err 返回完整文本（调用方直接打印后正常退出）。
 pub fn parse_args(args: &[String]) -> Result<Cli, String> {
@@ -1161,5 +1299,113 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("--sample"), "非法样本数应报错：{}", err);
+    }
+
+    // —— roq q 子命令解析 ——
+
+    #[test]
+    fn parse_q_add_reads_name_template_and_update() {
+        let q_add = |extra: &[&str]| -> Vec<String> {
+            let mut base = vec!["q".to_string(), "add".to_string(), "n".to_string()];
+            base.extend(extra.iter().map(|s| s.to_string()));
+            base
+        };
+        let Command::Q(QCmd::Add {
+            name,
+            template,
+            update,
+        }) = parse_command(&q_add(&["SELECT {{id}}", "--update"])).unwrap()
+        else {
+            panic!("q add 应产出 Q(Add) 命令");
+        };
+        assert_eq!(name, "n");
+        assert_eq!(template, "SELECT {{id}}");
+        assert!(update, "--update 应解析为 update=true");
+        // 多段模板按空格拼接（同 explain 先例）；缺省不启用 --update
+        let Command::Q(QCmd::Add { template, update, .. }) =
+            parse_command(&q_add(&["SELECT", "{{id}}"])).unwrap()
+        else {
+            panic!("q add 应产出 Q(Add) 命令");
+        };
+        assert_eq!(template, "SELECT {{id}}", "模板应为位置参数空格拼接");
+        assert!(!update, "缺省不应启用 --update");
+    }
+
+    #[test]
+    fn parse_q_add_requires_name_and_template() {
+        // 缺模板
+        let err =
+            parse_command(&["q".to_string(), "add".to_string(), "n".to_string()]).unwrap_err();
+        assert!(err.contains("模板"), "缺模板应报错：{err}");
+        // 缺名
+        let err = parse_command(&["q".to_string(), "add".to_string()]).unwrap_err();
+        assert!(err.contains("<名>"), "缺名应报错：{err}");
+    }
+
+    #[test]
+    fn parse_q_remove_requires_yes() {
+        let err = parse_command(&["q".to_string(), "remove".to_string(), "n".to_string()])
+            .unwrap_err();
+        assert!(err.contains("--yes"), "缺 --yes 应有确认提示：{err}");
+    }
+
+    #[test]
+    fn parse_q_execution_collects_name_params_flags() {
+        let Command::SavedQuery { name, params, cli } = parse_command(&[
+            "q".to_string(),
+            "foo".to_string(),
+            "id=1".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ])
+        .unwrap() else {
+            panic!("q <名> 应产出 SavedQuery 命令");
+        };
+        assert_eq!(name, "foo");
+        assert_eq!(params, vec!["id=1".to_string()], "k=v 参数应原样透传");
+        assert_eq!(cli.format, OutputFormat::Json);
+        // 执行面未知 flag 仍拒绝（复用查询解析的 looks_like_flag 防线）
+        assert!(parse_command(&["q".to_string(), "--foo".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_q_management_verbs_dispatch() {
+        let Command::Q(QCmd::List) = parse_command(&["q".to_string(), "list".to_string()]).unwrap()
+        else {
+            panic!("q list 应产出 Q(List)");
+        };
+        let Command::Q(QCmd::Show { name }) = parse_command(&[
+            "q".to_string(),
+            "show".to_string(),
+            "n".to_string(),
+        ])
+        .unwrap() else {
+            panic!("q show 应产出 Q(Show)");
+        };
+        assert_eq!(name, "n");
+        let Command::Q(QCmd::Remove { name, yes }) = parse_command(&[
+            "q".to_string(),
+            "remove".to_string(),
+            "n".to_string(),
+            "--yes".to_string(),
+        ])
+        .unwrap() else {
+            panic!("q remove --yes 应产出 Q(Remove)");
+        };
+        assert_eq!(name, "n");
+        assert!(yes);
+        // show 缺名
+        assert!(parse_command(&["q".to_string(), "show".to_string()]).is_err());
+        // list 不吃任何额外参数（多余位置参数与未知 flag 均拒绝）
+        assert!(parse_command(&["q".to_string(), "list".to_string(), "多余".to_string()]).is_err());
+        assert!(parse_command(&["q".to_string(), "list".to_string(), "--foo".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_q_execution_without_name_yields_usage() {
+        let err = parse_command(&["q".to_string()]).unwrap_err();
+        assert!(err.contains("roq q"), "空执行面应回 q 用法：{err}");
+        let err = parse_command(&["q".to_string(), "--help".to_string()]).unwrap_err();
+        assert!(err.contains("roq q"), "q --help 应回 q 用法：{err}");
     }
 }
