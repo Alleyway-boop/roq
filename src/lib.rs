@@ -25,3 +25,4 @@ pub mod dpapi;
 pub mod gate;
 pub mod query;
 pub mod render;
+pub mod saved_query;
