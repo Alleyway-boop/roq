@@ -60,7 +60,7 @@ fn run_query(cli: Cli) -> ExitCode {
         append_audit_log(&audit_line(
             &cli.profile,
             "",
-            "",
+            cli.sql.as_deref().unwrap_or(""),
             0,
             false,
             start.elapsed().as_millis(),
@@ -87,13 +87,13 @@ fn run_query(cli: Cli) -> ExitCode {
             None => { eprintln!("缺少 SQL 语句。运行 roq --help 查看用法。"); return ExitCode::from(EXIT_USAGE); }
         },
     };
-    let sql = match gate(&sql) {
+    let sql = match gate(&sql, profile.engine) {
         Ok(sql) => sql,
         Err(reason) => {
             eprintln!("[roq 闸门拒绝] {}", reason);
             append_audit_log(&audit_line(
                 &cli.profile,
-                "",
+                &profile.database,
                 &sql,
                 0,
                 false,

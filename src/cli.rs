@@ -1004,7 +1004,7 @@ mod tests {
                 let sql = materialize_sql(cli.shortcut.as_ref().unwrap(), Engine::Mysql)
                     .expect("应物化成功");
                 assert_eq!(sql, "SHOW TABLES LIKE '%a''b%'");
-                assert!(crate::gate::gate(&sql).is_ok(), "生成 SQL 应能过闸门：{sql}");
+                assert!(crate::gate::gate(&sql, Engine::Mysql).is_ok(), "生成 SQL 应能过闸门：{sql}");
             }
             _ => panic!(),
         }

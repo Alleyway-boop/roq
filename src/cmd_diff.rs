@@ -49,25 +49,6 @@ pub fn run(args: DiffArgs) -> ExitCode {
     let [left_name, right_name]: [String; 2] =
         args.profiles.try_into().expect("解析层已保证恰好两个 profile");
     let raw_sql = args.sql.unwrap_or_default();
-    // 闸门一次（同一 SQL 两侧共用），拒绝即整体拒绝并留痕
-    let sql = match gate(&raw_sql) {
-        Ok(sql) => sql,
-        Err(reason) => {
-            eprintln!("[roq 闸门拒绝] {}", reason);
-            append_audit_log(&audit_line(
-                &left_name,
-                "",
-                &raw_sql,
-                0,
-                false,
-                0,
-                "gate-rejected",
-                &format!(",\"reason\":\"{}\"", json_escape(&reason)),
-                "",
-            ));
-            return ExitCode::from(2);
-        }
-    };
     let profiles = match load_config_sources(args.config.as_ref()) {
         Ok(profiles) => profiles,
         Err(msg) => {
@@ -87,9 +68,28 @@ pub fn run(args: DiffArgs) -> ExitCode {
             let reason = format!("profile-missing: {}", missing);
             eprintln!("[roq diff] 配置 [{}] 不存在。--list 查看全部。", missing);
             append_audit_log(&audit_line(
-                &left_name, "", &sql, 0, false, 0, "config-error", &reason, "",
+                &left_name, "", &raw_sql, 0, false, 0, "config-error", &reason, "",
             ));
             return ExitCode::from(1);
+        }
+    };
+    // 闸门一次（同一 SQL 两侧共用，引擎取左侧；跨引擎拒绝属后续任务），拒绝即整体拒绝并留痕
+    let sql = match gate(&raw_sql, left_profile.engine) {
+        Ok(sql) => sql,
+        Err(reason) => {
+            eprintln!("[roq 闸门拒绝] {}", reason);
+            append_audit_log(&audit_line(
+                &left_name,
+                &left_profile.database,
+                &raw_sql,
+                0,
+                false,
+                0,
+                "gate-rejected",
+                &format!(",\"reason\":\"{}\"", json_escape(&reason)),
+                "",
+            ));
+            return ExitCode::from(2);
         }
     };
     // 逐侧执行并各记一条审计；任一侧失败即中止（对账无意义）
