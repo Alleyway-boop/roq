@@ -43,6 +43,11 @@ impl DiffReport {
     }
 }
 
+/// 跨引擎拒绝文案：闸门语义与类型口径随引擎不同，比对只在同引擎组合间有意义。
+fn cross_engine_refusal(left: &str, right: &str) -> String {
+    format!("两侧引擎不同（{} vs {}），闸门语义与类型口径不同，不支持跨引擎比对", left, right)
+}
+
 pub fn run(args: DiffArgs) -> ExitCode {
     let [left_name, right_name]: [String; 2] =
         args.profiles.try_into().expect("解析层已保证恰好两个 profile");
@@ -72,7 +77,27 @@ pub fn run(args: DiffArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // 闸门一次（同一 SQL 两侧共用，引擎取左侧；跨引擎拒绝属后续任务），拒绝即整体拒绝并留痕
+    // 跨引擎比对无意义：闸门语义与类型口径随引擎不同，配置即错误（先于闸门整体拒绝并留痕）
+    if left_profile.engine != right_profile.engine {
+        eprintln!(
+            "[roq diff] {}",
+            cross_engine_refusal(left_profile.engine.as_str(), right_profile.engine.as_str())
+        );
+        append_audit_log(&audit_line(
+            &left_name,
+            left_profile.engine.as_str(),
+            "",
+            &raw_sql,
+            0,
+            false,
+            0,
+            "config-error",
+            ",\"reason\":\"cross-engine\"",
+            "",
+        ));
+        return ExitCode::from(1);
+    }
+    // 闸门一次（同一 SQL 两侧共用，引擎取左侧；跨引擎组合已在闸门前拒绝），拒绝即整体拒绝并留痕
     let sql = match gate(&raw_sql, left_profile.engine) {
         Ok(sql) => sql,
         Err(reason) => {
@@ -583,5 +608,12 @@ mod tests {
             "差异样本应进 json：{}",
             json
         );
+    }
+
+    #[test]
+    fn cross_engine_refusal_message_is_explicit() {
+        let msg = cross_engine_refusal("mysql", "oracle");
+        assert!(msg.contains("mysql") && msg.contains("oracle"));
+        assert!(msg.contains("不支持跨引擎"), "文案应直说不可跨引擎：{}", msg);
     }
 }
