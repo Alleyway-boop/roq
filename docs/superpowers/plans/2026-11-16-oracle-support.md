@@ -661,19 +661,19 @@ git commit -m "docs: v1.0.0 双引擎发版文档（SKILL/README 双语/CHANGELO
 
 **Interfaces:** 无；产出验收结论（记入最终汇报与 CHANGELOG 备注）。
 
-- [ ] **Step 1: 起容器并等待就绪**
+- [ ] **Step 1: 打通到验收实例的连接**
+
+验收环境（已确认）：远程 Oracle Database Free 实例（gvenzl/oracle-free），部署于使用者的家庭服务器；凭据与主机名不入仓库（红线 6 精神），执行会话内凭 memory 与使用者确认。访问经 SSH 本地端口转发：
 
 ```bash
-docker run -d --name roq-oracle-e2e -p 1521:1521 -e ORACLE_PASSWORD=oracle gvenzl/oracle-free:23-slim
-# 轮询日志直至出现 "DATABASE IS READY TO USE"（首次约 2-5 分钟）
-docker logs -f roq-oracle-e2e
+ssh -L 1521:localhost:1521 <host> -N   # 前台保持；roq 侧一律连 localhost:1521
 ```
 
-若 Docker 不可用：明确标注"端到端未执行，待人工验收"，不得谎称完成。
+实例未就绪时先在服务器上起容器（`docker run -d -p 1521:1521 -e ORACLE_PASSWORD=<密码> gvenzl/oracle-free`），轮询 `docker logs` 直至 "DATABASE IS READY TO USE"（首次约 2-5 分钟）。service name 用镜像默认 PDB `FREEPDB1`。若隧道/实例均不可用：明确标注"端到端未执行，待人工验收"，不得谎称完成。
 
-- [ ] **Step 2: 灌种子数据（容器内 sqlplus，不经 roq——roq 是只读工具）**
+- [ ] **Step 2: 灌种子数据（服务器容器内 sqlplus，不经 roq——roq 是只读工具）**
 
-`docker exec` 进容器以 `system/oracle@localhost/FREEPDB1` 执行 seed SQL（脚本先写到宿主临时目录再 `docker cp`）：
+SSH 到服务器后 `docker exec` 进容器以 `system/<密码>@localhost/FREEPDB1` 执行 seed SQL（脚本先写宿主临时目录再 `docker cp`）：
 
 ```sql
 CREATE TABLE roq_e2e (
@@ -695,7 +695,7 @@ COMMIT;
 - [ ] **Step 3: 录 profile 并核对基础链路**
 
 ```bash
-cargo run -q -- config add oradev --host localhost --port 1521 --user system --password oracle --database FREEPDB1 --engine oracle
+cargo run -q -- config add oradev --host localhost --port 1521 --user system --password <验收实例密码> --database FREEPDB1 --engine oracle
 cargo run -q -- config test oradev        # 期望：连接成功 + banner + 会话只读
 cargo run -q -- -p oradev "SELECT id, name FROM roq_e2e ORDER BY id"   # 期望：正常 tsv
 ```
@@ -709,7 +709,7 @@ cargo run -q -- -p oradev "SELECT id, name FROM roq_e2e ORDER BY id"   # 期望�
 5. **闸门活体负例**：`"SELECT 1 FROM dual; DROP TABLE roq_e2e"` → 退出码 2；`"SELECT OBJ# FROM roq_e2e"` 之类含 `#` 标识（若列名无 #，用字符串 `'OBJ#'`）→ 正常执行不截断；`"SELECT 'a;b' FROM dual"` → 正常（多语句不误判）。
 6. **审计与存档**：`roq log --last 10` 显示 oracle 行（engine 列）；`~/.roq/logs/` 当月 jsonl 中该批行含 `"engine":"oracle"`；`.roq/results/` 有 GET_DDL 命名存档（slug=t_roq_e2e 形态）。
 7. **diff**：`roq diff dev oradev "SELECT 1 FROM dual"`（dev 为任一 mysql profile）→ 退出码 1 拒绝文案；若手头无 mysql 实例可连，仅验证拒绝文案（连不上即失败路径，不影响断言）。
-8. **收尾**：`docker rm -f roq-oracle-e2e`；确认 `~/.roq/profiles.d/oradev.conf` 含 `engine=oracle` 且密码已 DPAPI 加密。
+8. **收尾**：关闭 SSH 隧道；验收实例常驻，不关闭、不动服务器上的容器；确认 `~/.roq/profiles.d/oradev.conf` 含 `engine=oracle` 且密码已 DPAPI 加密。
 
 任一断言失败：回修对应任务代码、补回归测试，重跑本清单。
 
