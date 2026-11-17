@@ -201,6 +201,14 @@ pub fn table_slug(sql: &str) -> Option<String> {
         )
     };
     let tokens = extract_tokens(sql);
+    // GET_DDL 语句：FROM dual 无表名语义，第二实参（词元位 4：SELECT DBMS_METADATA GET_DDL <类型> <对象名>）才是对象名
+    if tokens.get(1).map(String::as_str) == Some("DBMS_METADATA")
+        && tokens.get(2).map(String::as_str) == Some("GET_DDL")
+    {
+        return tokens
+            .get(4)
+            .map(|name| name.to_lowercase().chars().take(40).collect());
+    }
     for (index, token) in tokens.iter().enumerate() {
         if matches!(
             token.as_str(),
@@ -285,14 +293,23 @@ pub fn is_show_create(sql: &str) -> bool {
         && tokens.get(2).map(String::as_str) == Some("TABLE")
 }
 
-/// 终端 tsv 单格截断上限：--out 全量；SHOW CREATE TABLE（未显式限流时）全量；其余按 --max-cell。
+/// 语句是否为 Oracle `SELECT DBMS_METADATA.GET_DDL(...) FROM dual` 单格取 DDL（输入应为闸门规范化后的 SQL）。
+/// 词元由 extract_tokens 归全大写（`.` 分词、`_` 保留），与 SHOW CREATE TABLE 同享单格交付豁免。
+pub fn is_get_ddl(sql: &str) -> bool {
+    let tokens = extract_tokens(sql);
+    tokens.first().map(String::as_str) == Some("SELECT")
+        && tokens.get(1).map(String::as_str) == Some("DBMS_METADATA")
+        && tokens.get(2).map(String::as_str) == Some("GET_DDL")
+}
+
+/// 终端 tsv 单格截断上限：--out 全量；单格交付语句（SHOW CREATE TABLE / GET_DDL，未显式限流时）全量；其余按 --max-cell。
 pub fn terminal_max_cell(
     is_out: bool,
-    is_show_create_stmt: bool,
+    is_single_cell_stmt: bool,
     max_cell_explicit: bool,
     max_cell: usize,
 ) -> usize {
-    if is_out || (is_show_create_stmt && !max_cell_explicit) {
+    if is_out || (is_single_cell_stmt && !max_cell_explicit) {
         usize::MAX
     } else {
         max_cell
@@ -433,6 +450,27 @@ mod tests {
         assert_eq!(terminal_max_cell(false, true, true, 500), 500);
         // 普通语句按 --max-cell
         assert_eq!(terminal_max_cell(false, false, false, 200), 200);
+    }
+
+    #[test]
+    fn get_ddl_detection_and_slug() {
+        assert!(is_get_ddl(
+            "SELECT DBMS_METADATA.GET_DDL('TABLE', 'T_USER') FROM dual"
+        ));
+        assert!(!is_get_ddl("SELECT 1 FROM dual"));
+        assert!(!is_get_ddl("SHOW CREATE TABLE t_user"));
+        // 存档命名：GET_DDL 第二实参（词元位 4：SELECT DBMS_METADATA GET_DDL TABLE T_USER）作 slug
+        assert_eq!(
+            table_slug("SELECT DBMS_METADATA.GET_DDL('TABLE', 'T_USER') FROM dual"),
+            Some("t_user".to_string())
+        );
+    }
+
+    #[test]
+    fn terminal_max_cell_exempts_get_ddl_like_show_create() {
+        assert_eq!(terminal_max_cell(false, true, false, 200), usize::MAX);
+        // 显式 --max-cell 让位（与 SHOW CREATE TABLE 同语义）
+        assert_eq!(terminal_max_cell(false, true, true, 200), 200);
     }
 
     #[test]

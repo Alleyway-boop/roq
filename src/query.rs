@@ -12,8 +12,8 @@ use crate::cli::Cli;
 use crate::config::Profile;
 use crate::conn::connect_readonly;
 use crate::render::{
-    is_show_create, render_csv, render_json, terminal_max_cell, truncate_cell, tsv_cell,
-    CellValue, OutputFormat,
+    is_get_ddl, is_show_create, render_csv, render_json, terminal_max_cell, truncate_cell,
+    tsv_cell, CellValue, OutputFormat,
 };
 
 /// 执行一条已过闸门的查询。所有退出路径（含失败）都会写审计日志。
@@ -92,10 +92,10 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     let columns: Vec<String> = result.columns().to_vec();
     // 存档恒为 TSV（lines 收集全量转义行，不截断）；json/csv 额外收集归一单元格，结束时整体渲染。
     // --out 写文件即交付全量（--max-cell 仅终端显示限流），审计 result 记该路径（替代自动存档）；
-    // SHOW CREATE TABLE 的单格即交付物，未显式限流时终端不截断。
+    // SHOW CREATE TABLE / GET_DDL 的单格即交付物，未显式限流时终端不截断。
     let display_max_cell = terminal_max_cell(
         cli.out.is_some(),
-        is_show_create(sql),
+        is_show_create(sql) || is_get_ddl(sql),
         cli.max_cell_explicit,
         cli.max_cell,
     );
