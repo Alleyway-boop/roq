@@ -20,6 +20,9 @@ const CONNECT_TIMEOUT_SECS: u64 = 8;
 const READ_TIMEOUT_SECS: u64 = 60;
 /// 服务端 SELECT 执行时间上限（毫秒），防慢查询拖垮库。
 const MAX_EXECUTION_TIME_MS: u32 = 30_000;
+/// CLOB 初始容量的钳制上限（64MB）：LOB 报告尺寸不完全可信，虚高值直接预分配会打爆内存，
+/// 超出部分交由 read_to_end 按实际内容自然增长。
+const CLOB_CAPACITY_HINT_CEILING: usize = 64 << 20;
 
 /// 由 profile 构建 MySQL 连接参数（适配层内部共用）。
 /// 密码由调用方先经 [`Profile::resolved_password`] 解析后传入。
@@ -243,7 +246,7 @@ fn oracle_clob_cell(row: &OracleRow, index: usize) -> Result<CellValue, String> 
         return Ok(CellValue::Null);
     };
     let size = lob.get_size().map_err(|e| e.to_string())?;
-    let mut bytes = Vec::with_capacity(size);
+    let mut bytes = Vec::with_capacity(size.min(CLOB_CAPACITY_HINT_CEILING));
     lob.read_to_end(&mut bytes)
         .map_err(|e| format!("LOB 读取失败：{}", e))?;
     String::from_utf8(bytes)

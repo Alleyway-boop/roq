@@ -96,7 +96,7 @@ profile 声明 `engine=oracle` 即走 Oracle（要求 Oracle Database ≥ 12；t
   - `roq tables [模式]` → 查 `user_tables`（仅当前 schema；模式过滤两侧自动转大写匹配）
   - `roq columns <表> [列模式]` → 查 `user_tab_columns` + `user_col_comments`（字段/类型/长度/精度/可空/默认值/注释；不支持 `属主.表` 两段名——user_* 视图仅覆盖当前 schema，显式报错而非静默空集）
   - `roq schema <表|属主.表>` → `DBMS_METADATA.GET_DDL`（完整 DDL，免单格截断；两段名的首段映射为 GET_DDL 的属主参数）
-  - `roq explain` → **不支持**：`EXPLAIN PLAN` 会真实写入 PLAN_TABLE（写操作，违反只读保障），生成前即拒绝（exit=2）
+  - `roq explain` → **不支持**：`EXPLAIN PLAN` 会真实写入 PLAN_TABLE（写操作，违反只读保障），生成前即拒绝（exit=1）
 - 会话只读：连接后执行 `SET TRANSACTION READ ONLY`（Oracle 协议保证该 SET 不被静默忽略），另有 60 秒 call timeout 兜底慢查询
 - `roq diff` 拒绝跨引擎比对（mysql 与 oracle 的 profile 互比直接报错）——闸门语义与类型口径不同，比对结果无意义
 - 审计行含 `engine` 字段（"mysql"/"oracle"），`roq log` 照常展示，历史无 engine 的行也兼容

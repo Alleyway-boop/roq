@@ -109,7 +109,8 @@ pub enum ConfigCmd {
     Add {
         name: String,
         host: String,
-        port: u16,
+        /// --port 显式传入值；None（未传）时由写入路径按引擎缺省落 port 行（mysql 3306 / oracle 1521）。
+        port: Option<u16>,
         user: String,
         password: Option<String>,
         password_env: Option<String>,
@@ -292,7 +293,7 @@ fn materialize_mysql(shortcut: &Shortcut) -> Result<String, String> {
     Ok(match shortcut {
         Shortcut::Tables(None) => "SHOW TABLES".to_string(),
         Shortcut::Tables(Some(pattern)) => {
-            format!("SHOW TABLES LIKE {}", like_pattern_literal(pattern)?)
+            format!("SHOW TABLES LIKE {}", like_pattern_literal(pattern, Engine::Mysql)?)
         }
         Shortcut::Schema(table) => build_schema_sql(table)?,
         Shortcut::Columns(table, None) => {
@@ -301,7 +302,7 @@ fn materialize_mysql(shortcut: &Shortcut) -> Result<String, String> {
         Shortcut::Columns(table, Some(pattern)) => format!(
             "SHOW FULL COLUMNS FROM {} LIKE {}",
             quoted_table_name(table)?,
-            like_pattern_literal(pattern)?
+            like_pattern_literal(pattern, Engine::Mysql)?
         ),
         Shortcut::Explain(sql) => format!("EXPLAIN {}", sql),
     })
@@ -317,7 +318,7 @@ fn materialize_oracle(shortcut: &Shortcut) -> Result<String, String> {
         }
         Shortcut::Tables(Some(pattern)) => Ok(format!(
             "SELECT table_name FROM user_tables WHERE UPPER(table_name) LIKE UPPER({}) ORDER BY table_name",
-            like_pattern_literal(pattern)?
+            like_pattern_literal(pattern, Engine::Oracle)?
         )),
         Shortcut::Schema(table) => {
             let (table_literal, owner_literal) = oracle_table_literals(table)?;
@@ -344,7 +345,7 @@ fn materialize_oracle(shortcut: &Shortcut) -> Result<String, String> {
             let filter = pattern
                 .as_ref()
                 .map(|p| {
-                    like_pattern_literal(p)
+                    like_pattern_literal(p, Engine::Oracle)
                         .map(|lit| format!(" AND UPPER(c.column_name) LIKE UPPER({})", lit))
                 })
                 .transpose()?;
@@ -363,13 +364,14 @@ fn materialize_oracle(shortcut: &Shortcut) -> Result<String, String> {
 
 /// LIKE 模式进单引号字面量：显式含 % 时按 LIKE 通配符原样使用（t_report% 做前缀匹配），
 /// 其余（含 snake_case 的 `_`）视为子串自动包 %...%；单引号双写转义（SQL 标准写法，与 SQL mode 无关）。
-/// 反斜杠一律拒绝：MySQL 默认模式把它当转义前缀（\b 即退格），静默改变语义不如显式报错。
-fn like_pattern_literal(pattern: &str) -> Result<String, String> {
+/// 反斜杠一律拒绝，报错文案按引擎分流：mysql 默认模式把它当转义前缀（\b 即退格），
+/// oracle 则视为字面量——两引擎转义语义不一致，统一拒绝而非静默改变语义。
+fn like_pattern_literal(pattern: &str, engine: Engine) -> Result<String, String> {
     if pattern.contains('\\') {
-        return Err(
-            "过滤模式不支持反斜杠（MySQL 会将其解释为转义前缀，语义易歧义）；请去掉反斜杠后重试"
-                .to_string(),
-        );
+        return Err(match engine {
+            Engine::Mysql => "过滤模式不支持反斜杠（MySQL 会将其解释为转义前缀，语义易歧义）；请去掉反斜杠后重试".to_string(),
+            Engine::Oracle => "过滤模式不支持反斜杠（mysql 视其为转义前缀而 oracle 视其为字面量，两引擎语义不一致，统一拒绝）；请去掉反斜杠后重试".to_string(),
+        });
     }
     let escaped = pattern.replace('\'', "''");
     if pattern.contains('%') {
@@ -467,7 +469,9 @@ fn config_usage() -> String {
 fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     let mut name: Option<String> = None;
     let mut host: Option<String> = None;
-    let mut port: u16 = 3306;
+    // --port 只记录"是否显式传入"（None=未传）：引擎缺省由写入路径按 engine.default_port() 决定，
+    // 解析层不得自带 mysql 缺省，否则 `--engine oracle` 不带 --port 会落下 3306
+    let mut port: Option<u16> = None;
     let mut user: Option<String> = None;
     let mut password: Option<String> = None;
     let mut password_env: Option<String> = None;
@@ -536,7 +540,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
                 let Some(v) = args.get(i + 1) else {
                     return Err("--port 缺少参数".into());
                 };
-                port = v.parse().map_err(|_| "--port 需要整数")?;
+                port = Some(v.parse().map_err(|_| "--port 需要整数")?);
                 i += 1;
             }
             "--engine" => {
@@ -1065,6 +1069,15 @@ mod tests {
         // 反斜杠拒绝属方言校验，随物化层按引擎执行：解析层只存意图
         let err = materialize_sql(&Shortcut::Tables(Some("a\\b".into())), Engine::Mysql).unwrap_err();
         assert!(err.contains("反斜杠"), "报错应说明反斜杠：{err}");
+        assert!(err.contains("MySQL"), "mysql 版文案应指向转义前缀语义：{err}");
+        // oracle 版说明两引擎转义语义不一致，不得沿用 mysql 单方措辞
+        let err = materialize_sql(&Shortcut::Tables(Some("a\\b".into())), Engine::Oracle).unwrap_err();
+        assert!(err.contains("反斜杠"), "报错应说明反斜杠：{err}");
+        assert!(
+            err.contains("oracle") && err.contains("mysql"),
+            "oracle 版文案应说明两引擎语义不一致：{err}"
+        );
+        assert!(!err.contains("MySQL 会"), "oracle 版不得再用 mysql 单方措辞：{err}");
     }
 
     #[test]
@@ -1333,6 +1346,40 @@ mod tests {
         oracle_ssl.push("--ssl".to_string());
         let err = parse_command(&oracle_ssl).unwrap_err();
         assert!(err.contains("ssl"), "oracle+ssl 应报用法错误：{}", err);
+    }
+
+    /// --port 未传时 Add 携带 None（引擎缺省由写入路径按 engine.default_port() 决定），
+    /// 显式传入时按值——解析层不得自带 mysql 缺省，否则 oracle 会落下 3306。
+    #[test]
+    fn parse_config_add_port_absent_is_none_and_explicit_is_some() {
+        let base: Vec<String> = [
+            "config",
+            "add",
+            "n",
+            "--host",
+            "h",
+            "--user",
+            "u",
+            "--password",
+            "p",
+            "--database",
+            "d",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let Command::Config(ConfigCmd::Add { port, .. }) = parse_command(&base).unwrap() else {
+            panic!("应产出 Config Add 命令");
+        };
+        assert_eq!(port, None, "未传 --port 应为 None，不得预填 mysql 缺省");
+        let mut with_port = base.clone();
+        with_port.push("--port".to_string());
+        with_port.push("1521".to_string());
+        let Command::Config(ConfigCmd::Add { port, .. }) = parse_command(&with_port).unwrap()
+        else {
+            panic!("应产出 Config Add 命令");
+        };
+        assert_eq!(port, Some(1521), "显式 --port 应按传入值");
     }
 
     #[test]

@@ -30,6 +30,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Install NASM (Windows)
+        # aws-lc-sys（依赖树内，MSVC 构建含汇编）需要 NASM；windows-latest 镜像缺装，
+        # 其余平台镜像自带无需处理。已装时 choco 幂等跳过，PATH 显式补上供后续步骤继承。
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
       - name: Test
         # 发版前先全量测试（含闸门注入负例），测试不过不出产物
         run: cargo test --release

@@ -86,7 +86,7 @@ fn validate_name(name: &str) -> Result<(), String> {
 fn add(
     name: &str,
     host: &str,
-    port: u16,
+    port: Option<u16>,
     user: &str,
     password: Option<&str>,
     password_env: Option<&str>,
@@ -118,7 +118,7 @@ fn add(
 fn add_with_sources(
     name: &str,
     host: &str,
-    port: u16,
+    port: Option<u16>,
     user: &str,
     password: Option<&str>,
     password_env: Option<&str>,
@@ -133,6 +133,9 @@ fn add_with_sources(
     if engine == Engine::Oracle && ssl {
         return Err("--engine oracle 不支持 --ssl（TCPS 连接未支持）".to_string());
     }
+    // --port 未显式传入时按引擎缺省落 port 行（mysql 3306 / oracle 1521）——
+    // 与文档宣称一致，落盘文件自描述，不依赖加载侧"port 键缺失按引擎补缺省"的兜底
+    let port = port.unwrap_or_else(|| engine.default_port());
     // 密码两形式互斥；--password 参数或交互录入的明文都带回供回读解密校验用
     let (secret_line, entry_plain) = build_secret_line(password, password_env)?;
     // 仅 oracle 落引擎行：前导换行使其紧跟 database 行独立成行（缺省即 mysql 不写冗余行）
@@ -473,7 +476,7 @@ mod tests {
         let msg = add(
             "demo",
             "h",
-            3307,
+            Some(3307),
             "u",
             None,
             Some("PWD"),
@@ -491,7 +494,7 @@ mod tests {
         let err = add(
             "demo",
             "h2",
-            3306,
+            Some(3306),
             "u2",
             None,
             Some("PWD2"),
@@ -507,7 +510,7 @@ mod tests {
         add(
             "other",
             "h2",
-            3306,
+            Some(3306),
             "u2",
             None,
             Some("PWD2"),
@@ -530,7 +533,7 @@ mod tests {
         let err = add(
             "bad/name",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("PWD"),
@@ -551,7 +554,7 @@ mod tests {
         add(
             "envy",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("MY_DB_PWD"),
@@ -576,7 +579,7 @@ mod tests {
         let err = add(
             "both",
             "h",
-            3306,
+            Some(3306),
             "u",
             Some("p"),
             Some("V"),
@@ -597,7 +600,7 @@ mod tests {
         add(
             "a1",
             "h1",
-            3306,
+            Some(3306),
             "u1",
             None,
             Some("PWD1"),
@@ -611,7 +614,7 @@ mod tests {
         add(
             "a2",
             "h2",
-            3307,
+            Some(3307),
             "u2",
             None,
             Some("PWD2"),
@@ -625,7 +628,7 @@ mod tests {
         let msg = add(
             "a1",
             "h9",
-            3308,
+            Some(3308),
             "u9",
             None,
             Some("PWD9"),
@@ -662,7 +665,7 @@ mod tests {
         let err = add(
             "x",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("PWD"),
@@ -687,7 +690,7 @@ mod tests {
         add(
             "dup",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("PWD"),
@@ -702,7 +705,7 @@ mod tests {
         let err = add_with_sources(
             "dup",
             "h2",
-            3306,
+            Some(3306),
             "u2",
             None,
             Some("PWD2"),
@@ -724,7 +727,7 @@ mod tests {
         let err = add_with_sources(
             "dup",
             "h3",
-            3306,
+            Some(3306),
             "u3",
             None,
             Some("PWD3"),
@@ -755,7 +758,7 @@ mod tests {
         add(
             "here",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("PWD"),
@@ -790,7 +793,7 @@ mod tests {
         add(
             "enc1",
             "h",
-            3306,
+            Some(3306),
             "u",
             Some("s3cret!"),
             None,
@@ -843,7 +846,7 @@ mod tests {
         let err = add(
             "nw",
             "h",
-            3306,
+            Some(3306),
             "u",
             Some("p"),
             None,
@@ -876,7 +879,7 @@ mod tests {
         add(
             "old",
             "h9",
-            3306,
+            Some(3306),
             "u9",
             Some("new-plain-pwd"),
             None,
@@ -916,7 +919,7 @@ mod tests {
         let add_msg = add(
             "nosurf",
             "h",
-            3306,
+            Some(3306),
             "u",
             Some(MARKER),
             None,
@@ -985,7 +988,7 @@ mod tests {
         add(
             "solo",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("PWD"),
@@ -1004,7 +1007,7 @@ mod tests {
         add(
             "a1",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("PWD"),
@@ -1018,7 +1021,7 @@ mod tests {
         add(
             "a2",
             "h",
-            3306,
+            Some(3306),
             "u",
             None,
             Some("PWD"),
@@ -1046,7 +1049,7 @@ mod tests {
         )
         .unwrap();
         add(
-            "a", "h9", 3306, "u9", None, Some("V9"), "d9", false, Some(path.clone()), true,
+            "a", "h9", Some(3306), "u9", None, Some("V9"), "d9", false, Some(path.clone()), true,
             Engine::Mysql,
         )
         .unwrap();
@@ -1065,7 +1068,7 @@ mod tests {
     #[test]
     fn add_rejects_empty_password() {
         let err = add(
-            "empty", "h", 3306, "u", Some(""), None, "d", false, Some(temp_conf("empty")), false,
+            "empty", "h", Some(3306), "u", Some(""), None, "d", false, Some(temp_conf("empty")), false,
             Engine::Mysql,
         )
         .unwrap_err();
@@ -1077,7 +1080,7 @@ mod tests {
         let path = temp_conf("eng-add");
         let _ = fs::remove_file(&path);
         // 密码走 password_env（引擎无关、全平台可跑）：--password 的 DPAPI 路径仅 Windows 可用
-        let msg = add_with_sources("demo", "h", 1521, "u", None, Some("PWD_ENV"), "FREEPDB1", false,
+        let msg = add_with_sources("demo", "h", Some(1521), "u", None, Some("PWD_ENV"), "FREEPDB1", false,
             Some(path.clone()), false, Engine::Oracle, &[]).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(
@@ -1094,12 +1097,44 @@ mod tests {
         assert!(msg.contains("oracle"), "成功提示应含引擎：{}", msg);
         // mysql 显式 engine 不写行（缺省即 mysql）
         let path2 = temp_conf("eng-add-m");
-        add_with_sources("m", "h", 3306, "u", None, Some("PWD_ENV"), "d", false,
+        add_with_sources("m", "h", Some(3306), "u", None, Some("PWD_ENV"), "d", false,
             Some(path2.clone()), false, Engine::Mysql, &[]).unwrap();
         assert!(!fs::read_to_string(&path2).unwrap().contains("engine="));
         // oracle + ssl 拒绝（双保险先于密码路径，全平台可跑）
-        let err = add_with_sources("s", "h", 1521, "u", Some("p"), None, "d", true,
+        let err = add_with_sources("s", "h", Some(1521), "u", Some("p"), None, "d", true,
             Some(temp_conf("eng-add-s")), false, Engine::Oracle, &[]).unwrap_err();
         assert!(err.contains("ssl"), "应拒绝 oracle+ssl：{}", err);
+    }
+
+    /// 终审接缝钉住：--port 未显式传入时写入路径按引擎缺省落 port 行——
+    /// 文档宣称 oracle 缺省 1521；若解析层把 mysql 缺省 3306 无条件带下来，在此暴露。
+    #[test]
+    fn add_port_defaults_follow_engine_when_flag_omitted() {
+        let oracle_path = temp_conf("port-ora");
+        let _ = fs::remove_file(&oracle_path);
+        add_with_sources("ora", "h", None, "u", None, Some("PWD_ENV"), "FREEPDB1", false,
+            Some(oracle_path.clone()), false, Engine::Oracle, &[]).unwrap();
+        let oracle_profiles = load_profiles(&oracle_path).unwrap();
+        assert_eq!(oracle_profiles["ora"].port, 1521, "oracle 缺省端口应为 1521");
+        assert!(
+            fs::read_to_string(&oracle_path).unwrap().contains("port=1521"),
+            "落盘应写 port=1521 而非 3306"
+        );
+        let mysql_path = temp_conf("port-my");
+        let _ = fs::remove_file(&mysql_path);
+        add_with_sources("my", "h", None, "u", None, Some("PWD_ENV"), "d", false,
+            Some(mysql_path.clone()), false, Engine::Mysql, &[]).unwrap();
+        let mysql_profiles = load_profiles(&mysql_path).unwrap();
+        assert_eq!(mysql_profiles["my"].port, 3306, "mysql 缺省端口应为 3306");
+        // 显式 --port 优先于引擎缺省（oracle 显式 1521 原样落盘）
+        let explicit_path = temp_conf("port-explicit");
+        let _ = fs::remove_file(&explicit_path);
+        add_with_sources("ex", "h", Some(1521), "u", None, Some("PWD_ENV"), "d", false,
+            Some(explicit_path.clone()), false, Engine::Oracle, &[]).unwrap();
+        let explicit_profiles = load_profiles(&explicit_path).unwrap();
+        assert_eq!(explicit_profiles["ex"].port, 1521, "显式端口按传入值");
+        let _ = fs::remove_file(&oracle_path);
+        let _ = fs::remove_file(&mysql_path);
+        let _ = fs::remove_file(&explicit_path);
     }
 }
