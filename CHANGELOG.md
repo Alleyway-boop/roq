@@ -8,7 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). V
 
 ## [Unreleased]
 
-## [1.0.0] — 2026-11-17
+## [2.0.0] — 2026-11-17
 
 ### Added
 
@@ -17,8 +17,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). V
   official pure-Rust thin driver — no Instant Client, no client libraries, single-binary
   delivery unchanged. The release binary grows from ~2.5 MB to ~3.3 MB.
   - Profiles: `engine=mysql|oracle` (undeclared defaults to mysql with zero behavior change);
-    Oracle default port 1521; `ssl=true` with Oracle is rejected at config load (TCPS
-    unsupported, fail-closed).
+    Oracle default port 1521 on both the load and `config add` paths; `ssl=true` with Oracle
+    is rejected at config load (TCPS unsupported, fail-closed).
   - Gate: engine-aware — Oracle allows only `SELECT`/`WITH` leading keywords; dialect-specific
     scanning (`#` is an ordinary character, `--` comments immediately, backslashes inside string
     literals are literal, backticks rejected); the forbidden-word scan is shared with MySQL.
@@ -35,6 +35,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). V
     field existed remain readable).
   - `roq diff` refuses cross-engine comparisons (fail-closed — gate semantics and type
     treatment differ per engine, so the numbers would be misleading).
+  - README gains an Oracle support section and a per-engine shortcut mapping table (English
+    and Chinese kept in sync); the bundled skill documents Oracle usage, gate differences,
+    and the `explain` restriction.
+
+## [1.0.0] — 2026-11-17
+
+First stable release of the MySQL-only tool (tag applied retroactively to the master state
+that preceded the dual-engine work).
+
+### Added
+
 - `roq tables` and `roq columns` accept an optional filter pattern: a bare substring is
   auto-wrapped as `%substring%` (`roq tables mark`), while a pattern containing `%` is used
   verbatim for LIKE matching (`roq tables t_report%`); patterns containing a backslash are
@@ -58,9 +69,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). V
   quick start → usage → configuration → security model → audit); this changelog introduced.
 - Help text covers the `config` and `log` subcommand entry points; `diff` line mentions
   `--sample`; local update instructions switched to `cargo install`.
-- README gains an Oracle support section and a per-engine shortcut mapping table (English and
-  Chinese kept in sync); the bundled skill documents Oracle usage, gate differences, and the
-  `explain` restriction.
 
 ## [0.10.0] — 2026-10-23
 
