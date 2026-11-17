@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::cli::ConfigCmd;
-use crate::config::{default_config_base, load_config_sources, load_profiles, print_profiles};
+use crate::config::{
+    default_config_base, load_config_sources, load_profiles, print_profiles, Engine,
+};
 use crate::conn::connect_readonly;
 
 pub fn run(cmd: ConfigCmd) -> ExitCode {
@@ -418,8 +420,13 @@ fn test(name: &str) -> Result<String, String> {
     // 建连与会话只读防护走统一适配层（与查询执行同一条链路）；失败文案由适配层给出
     let mut conn = connect_readonly(profile, &password, &|msg| eprintln!("{}", msg))
         .map_err(|e| format!("[{}] {}", name, e))?;
+    // 版本探测按引擎分流（均为字面量 SQL，不经闸门：config test 是配置自检不是用户查询）
+    let version_sql = match profile.engine {
+        Engine::Mysql => "SELECT VERSION()",
+        Engine::Oracle => "SELECT banner FROM v$version WHERE ROWNUM = 1",
+    };
     let version = conn
-        .query_first_string("SELECT VERSION()")
+        .query_first_string(version_sql)
         .map_err(|e| format!("[{}] 查询版本失败：{}", name, e))?;
     Ok(format!(
         "[{}] 连接成功 db={} server={} 会话只读=1（来源 {}）",

@@ -9,6 +9,8 @@ license = "MIT"
 [dependencies]
 # rustls-tls-ring：纯 Rust TLS 后端，保住零系统依赖/三平台可构建（native-tls 在 Linux 要 libssl-dev）
 mysql = { version = "26", features = ["rustls-tls-ring"] }
+# Oracle 官方纯 Rust thin 驱动（无需 Instant Client）；目标库须 ≥ 12
+oracledb = "26.0.0-beta.6"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # 仅为 roq log 解析审计行;已在 mysql 依赖树内,不增加体积
 serde_json = "1"
