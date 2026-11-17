@@ -20,6 +20,40 @@ pub fn plaintext_warning(name: &str) -> String {
     format!("[roq] 警告：profile {name} 密码为明文存储，{guidance}")
 }
 
+/// 数据库引擎类型：决定缺省端口，后续闸门与连接层按引擎分流 SQL 方言与驱动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    Mysql,
+    Oracle,
+}
+
+impl Engine {
+    /// 解析 engine 声明值（大小写不敏感）；未声明时的缺省语义由调用方兜底为 Mysql。
+    pub fn parse(value: &str) -> Result<Engine, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "mysql" => Ok(Engine::Mysql),
+            "oracle" => Ok(Engine::Oracle),
+            _ => Err(format!("engine 需为 mysql 或 oracle：{}", value)),
+        }
+    }
+
+    /// 引擎规范小写名（展示与审计文案用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Engine::Mysql => "mysql",
+            Engine::Oracle => "oracle",
+        }
+    }
+
+    /// 引擎缺省端口：MySQL 3306、Oracle 1521。
+    pub fn default_port(self) -> u16 {
+        match self {
+            Engine::Mysql => 3306,
+            Engine::Oracle => 1521,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Profile {
     pub host: String,
@@ -30,6 +64,8 @@ pub struct Profile {
     /// 密码所在环境变量名（与 password 二选一，凭据不落明文）。
     pub password_env: Option<String>,
     pub database: String,
+    /// 数据库引擎（INI 键 engine=mysql|oracle，未声明缺省 mysql）。
+    pub engine: Engine,
     /// 是否启用 TLS（RDS 部分端点不宣告 TLS 能力，强制启用会握手失败）。
     pub ssl: bool,
     /// 来源配置文件路径（多文件扫描时用于 --list 展示与冲突定位）。
@@ -129,9 +165,13 @@ pub fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String>
                 .map(|(_, v)| v.clone())
                 .ok_or_else(|| format!("配置 [{}] 缺少 {}", name, key))
         };
+        let engine = match kv.iter().find(|(k, _)| k == "engine") {
+            Some((_, value)) => Engine::parse(value)?,
+            None => Engine::Mysql,
+        };
         let port: u16 = match kv.iter().find(|(k, _)| k == "port") {
             Some((_, value)) => value.parse().map_err(|_| "port 需为整数".to_string())?,
-            None => 3306,
+            None => engine.default_port(),
         };
         // password 与 password_env 二选一：并存报错（避免隐式优先级），全无也报错。
         let password = kv
@@ -151,6 +191,16 @@ pub fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String>
         if password.is_none() && password_env.is_none() {
             return Err(format!("配置 [{}] 缺少 password 或 password_env", name));
         }
+        let ssl = kv
+            .iter()
+            .any(|(k, v)| k == "ssl" && v.eq_ignore_ascii_case("true"));
+        // Oracle 走 TCPS 的 SSL 连接未支持：显式拒绝而非静默忽略配置（fail-closed）。
+        if engine == Engine::Oracle && ssl {
+            return Err(format!(
+                "配置 [{}] engine=oracle 暂不支持 ssl（TCPS 连接未支持）",
+                name
+            ));
+        }
         let profile = Profile {
             host: get("host")?,
             port,
@@ -158,9 +208,8 @@ pub fn load_profiles(path: &PathBuf) -> Result<HashMap<String, Profile>, String>
             password,
             password_env,
             database: get("database")?,
-            ssl: kv
-                .iter()
-                .any(|(k, v)| k == "ssl" && v.eq_ignore_ascii_case("true")),
+            engine,
+            ssl,
             source: path.display().to_string(),
         };
         if profiles.contains_key(&name) {
@@ -412,6 +461,46 @@ mod tests {
     }
 
     #[test]
+    fn engine_parses_and_defaults_to_mysql() {
+        assert_eq!(Engine::parse("oracle").unwrap(), Engine::Oracle);
+        assert_eq!(Engine::parse("MYSQL").unwrap(), Engine::Mysql);
+        assert_eq!(
+            Engine::parse("x").unwrap_err(),
+            "engine 需为 mysql 或 oracle：x"
+        );
+        assert_eq!(Engine::Oracle.default_port(), 1521);
+        assert_eq!(Engine::Mysql.default_port(), 3306);
+    }
+
+    #[test]
+    fn oracle_profile_takes_1521_default_and_rejects_ssl() {
+        // 无 port 无 ssl：oracle 缺省 1521
+        let path = write_temp(
+            "eng-o",
+            "[o]\nhost=h\nuser=u\npassword=p\ndatabase=d\nengine=oracle\n",
+        );
+        let profiles = load_profiles(&path).unwrap();
+        assert_eq!(profiles["o"].port, 1521);
+        assert_eq!(profiles["o"].engine, Engine::Oracle);
+        // ssl=true 与 oracle 互斥
+        let path2 = write_temp(
+            "eng-ssl",
+            "[o]\nhost=h\nuser=u\npassword=p\ndatabase=d\nengine=oracle\nssl=true\n",
+        );
+        let err = load_profiles(&path2).unwrap_err();
+        assert!(
+            err.contains("[o]") && err.contains("ssl"),
+            "应指明节名与 ssl 冲突：{}",
+            err
+        );
+        // mysql profile 缺省 engine=Mysql、port 3306（回归既有行为）
+        let path3 = write_temp("eng-m", "[m]\nhost=h\nuser=u\npassword=p\ndatabase=d\n");
+        let profiles = load_profiles(&path3).unwrap();
+        assert_eq!(profiles["m"].engine, Engine::Mysql);
+        assert_eq!(profiles["m"].port, 3306);
+    }
+
+    #[test]
     fn missing_required_key_reports_section() {
         let path = write_temp("missing", "[b]\nhost=h\n");
         let err = load_profiles(&path).unwrap_err();
@@ -468,6 +557,7 @@ mod tests {
             password_env: None,
             database: "d".to_string(),
             ssl: false,
+            engine: Engine::Mysql,
             source: "test".to_string(),
         }
     }
