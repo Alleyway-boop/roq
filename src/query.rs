@@ -1,88 +1,20 @@
-//! 执行链路：连接 → 会话只读（SET + 回读断言）→ 流式输出 → 存档与审计。
+//! 执行链路：适配层建连（会话只读已断言）→ 流式输出 → 存档与审计。
 //!
 //! 每个失败路径都必须留审计痕迹，由 [`Self::execute`] 内的 log_exit 统一出口保证。
+//! 连接与会话只读防护见 [`crate::conn`]，本模块只负责执行编排与输出。
 
 use std::io::{BufWriter, Write};
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
-
-use mysql::prelude::Queryable;
-use mysql::{Conn, Opts, OptsBuilder, SslOpts};
+use std::time::Instant;
 
 use crate::audit::{append_audit_log, audit_line, json_escape, save_result};
 use crate::cli::Cli;
 use crate::config::Profile;
+use crate::conn::connect_readonly;
 use crate::render::{
-    is_show_create, raw_cell, render_csv, render_json, terminal_max_cell, truncate_cell, tsv_cell,
+    is_show_create, render_csv, render_json, terminal_max_cell, truncate_cell, tsv_cell,
     CellValue, OutputFormat,
 };
-
-/// 连接超时（秒）。
-const CONNECT_TIMEOUT_SECS: u64 = 8;
-/// 单次读超时（秒），覆盖流式取数全程。
-const READ_TIMEOUT_SECS: u64 = 60;
-/// 服务端 SELECT 执行时间上限（毫秒），防慢查询拖垮库。
-const MAX_EXECUTION_TIME_MS: u32 = 30_000;
-
-/// 由 profile 构建连接参数（查询执行与 config test 共用）。
-/// 密码由调用方先经 [`Profile::resolved_password`] 解析后传入。
-pub fn build_opts(profile: &Profile, password: &str) -> Opts {
-    let mut builder = OptsBuilder::new()
-        .ip_or_hostname(Some(profile.host.clone()))
-        .tcp_port(profile.port)
-        .user(Some(profile.user.clone()))
-        .pass(Some(password.to_string()))
-        .db_name(Some(profile.database.clone()))
-        .tcp_connect_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
-        .read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
-    // 若配置声明 ssl=true 则启用 TLS（加密但不校验证书，等价 JDBC useSSL=true 默认语义；
-    // MySQL 服务端普遍自签证书，严格校验会挡掉绝大多数真实端点）。
-    if profile.ssl {
-        builder = builder
-            .ssl_opts(Some(SslOpts::default().with_danger_accept_invalid_certs(true)));
-    }
-    Opts::from(builder)
-}
-
-/// 建连 + 第二层只读防护：会话只读 SET、回读断言、慢查询保险丝。
-/// 失败时直接向 stderr 报具体原因，并返回供审计的 reason（调用方统一记 connect-error 并退出）。
-pub fn connect_readonly(
-    profile: &Profile,
-    password: &str,
-    notice: &dyn Fn(String),
-) -> Result<Conn, String> {
-    let mut conn = Conn::new(build_opts(profile, password)).map_err(|e| {
-        eprintln!("[roq] 连接失败：{}", e);
-        e.to_string()
-    })?;
-    // 第二层防护：会话级只读。失败即中止（不允许降级为可写会话）。
-    if let Err(e) = conn.query_drop("SET SESSION TRANSACTION READ ONLY") {
-        eprintln!("[roq] 设置会话只读失败（中止查询）：{}", e);
-        return Err(format!("session-readonly: {e}"));
-    }
-    // 回读断言：防止代理/内核静默忽略 SET，导致会话实际可写。
-    let readonly_flag: Option<String> = conn
-        .query_first("SELECT @@session.transaction_read_only")
-        .map_err(|e| {
-            eprintln!("[roq] 回读只读标志失败（中止查询）：{}", e);
-            format!("verify-readonly: {e}")
-        })?;
-    if readonly_flag.as_deref() != Some("1") {
-        eprintln!(
-            "[roq] 服务端确认会话非只读（值={:?}），中止查询",
-            readonly_flag
-        );
-        return Err("verify-readonly: flag!=1".to_string());
-    }
-    // 慢查询保险丝：超时上限。个别内核不支持该变量时仅告警不阻断。
-    if let Err(e) = conn.query_drop(format!(
-        "SET SESSION max_execution_time={}",
-        MAX_EXECUTION_TIME_MS
-    )) {
-        notice(format!("[roq] 警告：未能设置 max_execution_time（{}）", e));
-    }
-    Ok(conn)
-}
 
 /// 执行一条已过闸门的查询。所有退出路径（含失败）都会写审计日志。
 pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
@@ -150,19 +82,14 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         Ok(conn) => conn,
         Err(reason) => return log_exit("connect-error", &reason, 0, false, "", 3),
     };
-    let mut result = match conn.query_iter(sql) {
+    let mut result = match conn.query(sql) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("[roq] 执行失败：{}", e);
-            return log_exit("exec-error", &e.to_string(), 0, false, "", 3);
+            return log_exit("exec-error", &e, 0, false, "", 3);
         }
     };
-    let columns: Vec<String> = result
-        .columns()
-        .as_ref()
-        .iter()
-        .map(|col| col.name_str().to_string())
-        .collect();
+    let columns: Vec<String> = result.columns().to_vec();
     // 存档恒为 TSV（lines 收集全量转义行，不截断）；json/csv 额外收集归一单元格，结束时整体渲染。
     // --out 写文件即交付全量（--max-cell 仅终端显示限流），审计 result 记该路径（替代自动存档）；
     // SHOW CREATE TABLE 的单格即交付物，未显式限流时终端不截断。
@@ -183,8 +110,8 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
     let mut cell_truncated = false;
     while rows_out < cli.max_rows {
         let Some(row) = result.next() else { break };
-        let row = match row {
-            Ok(row) => row,
+        let cells: Vec<CellValue> = match row {
+            Ok(cells) => cells,
             Err(e) => {
                 let _ = out.flush();
                 eprintln!("[roq] 读取行失败：{}", e);
@@ -203,7 +130,6 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
                 );
             }
         };
-        let cells: Vec<CellValue> = row.unwrap().into_iter().map(raw_cell).collect();
         lines.push(
             cells
                 .iter()
@@ -283,15 +209,4 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         }
     ));
     log_exit("ok", "", rows_out, truncated, &result_file, 0)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn timeouts_are_sane() {
-        // 常量仅自证存在与量级，防止误改单位（秒/毫秒）
-        assert_eq!(super::CONNECT_TIMEOUT_SECS, 8);
-        assert_eq!(super::READ_TIMEOUT_SECS, 60);
-        assert_eq!(super::MAX_EXECUTION_TIME_MS, 30_000);
-    }
 }

@@ -11,12 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use mysql::prelude::Queryable;
-use mysql::Conn;
-
 use crate::cli::ConfigCmd;
 use crate::config::{default_config_base, load_config_sources, load_profiles, print_profiles};
-use crate::query::build_opts;
+use crate::conn::connect_readonly;
 
 pub fn run(cmd: ConfigCmd) -> ExitCode {
     let result = match cmd {
@@ -418,18 +415,11 @@ fn test(name: &str) -> Result<String, String> {
     let password = profile
         .resolved_password(name)
         .map_err(|e| format!("[{}] {}", name, e))?;
-    let mut conn = Conn::new(build_opts(profile, &password))
-        .map_err(|e| format!("[{}] 连接失败：{}", name, e))?;
-    conn.query_drop("SET SESSION TRANSACTION READ ONLY")
-        .map_err(|e| format!("[{}] 设置会话只读失败：{}", name, e))?;
-    let flag: Option<String> = conn
-        .query_first("SELECT @@session.transaction_read_only")
-        .map_err(|e| format!("[{}] 回读只读标志失败：{}", name, e))?;
-    if flag.as_deref() != Some("1") {
-        return Err(format!("[{}] 服务端确认会话非只读（值={:?}）", name, flag));
-    }
-    let version: Option<String> = conn
-        .query_first("SELECT VERSION()")
+    // 建连与会话只读防护走统一适配层（与查询执行同一条链路）；失败文案由适配层给出
+    let mut conn = connect_readonly(profile, &password, &|msg| eprintln!("{}", msg))
+        .map_err(|e| format!("[{}] {}", name, e))?;
+    let version = conn
+        .query_first_string("SELECT VERSION()")
         .map_err(|e| format!("[{}] 查询版本失败：{}", name, e))?;
     Ok(format!(
         "[{}] 连接成功 db={} server={} 会话只读=1（来源 {}）",

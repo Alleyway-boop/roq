@@ -9,14 +9,12 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use mysql::prelude::Queryable;
-
 use crate::audit::{append_audit_log, audit_line, json_escape};
 use crate::cli::DiffArgs;
 use crate::config::{load_config_sources, Profile};
+use crate::conn::connect_readonly;
 use crate::gate::gate;
-use crate::query::connect_readonly;
-use crate::render::{raw_cell, tsv_cell, CellValue};
+use crate::render::{tsv_cell, CellValue};
 
 /// 比对不一致的专用退出码。
 const EXIT_DIFF_MISMATCH: u8 = 4;
@@ -157,19 +155,14 @@ fn fetch_side(
         connect_readonly(profile, &password, &|msg| eprintln!("{}", msg))
             .map_err(|e| ("connect-error".to_string(), e))?;
     let mut result = conn
-        .query_iter(sql)
-        .map_err(|e| ("exec-error".to_string(), e.to_string()))?;
-    let columns: Vec<String> = result
-        .columns()
-        .as_ref()
-        .iter()
-        .map(|col| col.name_str().to_string())
-        .collect();
+        .query(sql)
+        .map_err(|e| ("exec-error".to_string(), e))?;
+    let columns: Vec<String> = result.columns().to_vec();
     let mut rows: Vec<Vec<CellValue>> = Vec::new();
     while rows.len() < max_rows {
         let Some(row) = result.next() else { break };
         let row = row.map_err(|e| ("exec-error".to_string(), format!("read-row: {e}")))?;
-        rows.push(row.unwrap().into_iter().map(raw_cell).collect());
+        rows.push(row);
     }
     let truncated = result.next().is_some();
     let digest = row_digest(&rows);
