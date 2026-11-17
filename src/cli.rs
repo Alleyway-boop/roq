@@ -118,6 +118,8 @@ pub enum ConfigCmd {
         file: Option<PathBuf>,
         /// 覆盖重录：同名节已存在时替换而非拒绝（节不存在仍报错）。
         update: bool,
+        /// 目标引擎（--engine，缺省 mysql；oracle 与 --ssl 互斥，解析期即拒绝）。
+        engine: Engine,
     },
     Remove {
         name: String,
@@ -445,7 +447,7 @@ fn config_usage() -> String {
         "roq config —— 连接配置管理".to_string(),
         String::new(),
         "用法:".to_string(),
-        "  roq config add <名> --host 主机 --user 用户 [--password 密码 | --password-env 变量名] --database 库 [--port 3306] [--ssl] [--file 路径] [--update]".to_string(),
+        "  roq config add <名> --host 主机 --user 用户 [--password 密码 | --password-env 变量名] --database 库 [--port 3306] [--engine mysql|oracle] [--ssl] [--file 路径] [--update]".to_string(),
         "  roq config remove <名> [--file 路径] --yes".to_string(),
         "  roq config test <名>".to_string(),
         "  roq config list".to_string(),
@@ -455,6 +457,7 @@ fn config_usage() -> String {
         "密码规则：--password 在 Windows 上默认 DPAPI 加密落盘（enc:v1:dpapi: 前缀，仅当前用户可解），".to_string(),
         "  交互终端下省略密码参数会隐藏式提示输入；非 Windows 不接受 --password（明文不落盘），".to_string(),
         "  跨平台/脚本场景请用 --password-env（密码经环境变量传入，不落盘）。".to_string(),
+        "--engine 缺省 mysql（配置不写引擎行）；--engine oracle 写入 engine=oracle 行，且拒绝 --ssl（TCPS 未支持）。".to_string(),
         "migrate 把历史明文 password 就地转 DPAPI 密文（写前解密校验、幂等可重跑；仅 Windows）。".to_string(),
         "remove 仅当目标文件只含这一个配置节时才删文件，否则提示手动编辑；须 --yes 确认。".to_string(),
     ]
@@ -474,6 +477,7 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
     let mut config: Option<PathBuf> = None;
     let mut update = false;
     let mut yes = false;
+    let mut engine = Engine::Mysql;
     let mut action: Option<&str> = None;
     let mut i = 0;
     while i < args.len() {
@@ -535,6 +539,13 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
                 port = v.parse().map_err(|_| "--port 需要整数")?;
                 i += 1;
             }
+            "--engine" => {
+                let Some(v) = args.get(i + 1) else {
+                    return Err("--engine 缺少参数".into());
+                };
+                engine = Engine::parse(v)?;
+                i += 1;
+            }
             "--ssl" => ssl = true,
             "--update" => update = true,
             "--yes" => yes = true,
@@ -556,18 +567,25 @@ fn parse_config_cmd(args: &[String]) -> Result<ConfigCmd, String> {
             file,
             yes,
         }),
-        Some("add") => Ok(ConfigCmd::Add {
-            name: name.ok_or("config add 需要 <名>")?,
-            host: host.ok_or("config add 缺少 --host")?,
-            port,
-            user: user.ok_or("config add 缺少 --user")?,
-            password,
-            password_env,
-            database: database.ok_or("config add 缺少 --database")?,
-            ssl,
-            file,
-            update,
-        }),
+        Some("add") => {
+            // fail-fast：TCPS 连接未支持，oracle 与 --ssl 在解析期即互斥
+            if engine == Engine::Oracle && ssl {
+                return Err("--engine oracle 不支持 --ssl（TCPS 连接未支持）".to_string());
+            }
+            Ok(ConfigCmd::Add {
+                name: name.ok_or("config add 需要 <名>")?,
+                host: host.ok_or("config add 缺少 --host")?,
+                port,
+                user: user.ok_or("config add 缺少 --user")?,
+                password,
+                password_env,
+                database: database.ok_or("config add 缺少 --database")?,
+                ssl,
+                file,
+                update,
+                engine,
+            })
+        }
         _ => Err(config_usage()),
     }
 }
@@ -1273,6 +1291,48 @@ mod tests {
             panic!("应产出 Config Add 命令");
         };
         assert!(update, "--update 应解析为 update=true");
+    }
+
+    /// --engine 解析：缺省 mysql；oracle 进 Add；坏值与 oracle+ssl 都报用法错误
+    #[test]
+    fn parse_config_add_engine_flag_routes_and_rejects() {
+        let base: Vec<String> = [
+            "config",
+            "add",
+            "n",
+            "--host",
+            "h",
+            "--user",
+            "u",
+            "--password",
+            "p",
+            "--database",
+            "d",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let Command::Config(ConfigCmd::Add { engine, .. }) = parse_command(&base).unwrap() else {
+            panic!("应产出 Config Add 命令");
+        };
+        assert_eq!(engine, Engine::Mysql, "缺省应为 mysql");
+        let mut oracle_args = base.clone();
+        oracle_args.push("--engine".to_string());
+        oracle_args.push("oracle".to_string());
+        let Command::Config(ConfigCmd::Add { engine, .. }) = parse_command(&oracle_args).unwrap()
+        else {
+            panic!("应产出 Config Add 命令");
+        };
+        assert_eq!(engine, Engine::Oracle, "--engine oracle 应进 Add");
+        let mut bad_args = base.clone();
+        bad_args.push("--engine".to_string());
+        bad_args.push("bad".to_string());
+        let err = parse_command(&bad_args).unwrap_err();
+        assert!(err.contains("mysql 或 oracle"), "坏值应报用法错误：{}", err);
+        let mut oracle_ssl = oracle_args.clone();
+        oracle_ssl.push("--ssl".to_string());
+        let err = parse_command(&oracle_ssl).unwrap_err();
+        assert!(err.contains("ssl"), "oracle+ssl 应报用法错误：{}", err);
     }
 
     #[test]

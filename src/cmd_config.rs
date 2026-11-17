@@ -38,6 +38,7 @@ pub fn run(cmd: ConfigCmd) -> ExitCode {
             ssl,
             file,
             update,
+            engine,
         } => add(
             &name,
             &host,
@@ -49,6 +50,7 @@ pub fn run(cmd: ConfigCmd) -> ExitCode {
             ssl,
             file,
             update,
+            engine,
         ),
         ConfigCmd::Remove { name, file, yes } => remove(&name, file, yes),
         ConfigCmd::Test { name } => test(&name),
@@ -92,6 +94,7 @@ fn add(
     ssl: bool,
     file: Option<PathBuf>,
     update: bool,
+    engine: Engine,
 ) -> Result<String, String> {
     let sources = crate::config::default_config_files()?;
     add_with_sources(
@@ -105,6 +108,7 @@ fn add(
         ssl,
         file,
         update,
+        engine,
         &sources,
     )
 }
@@ -122,10 +126,21 @@ fn add_with_sources(
     ssl: bool,
     file: Option<PathBuf>,
     update: bool,
+    engine: Engine,
     sources: &[PathBuf],
 ) -> Result<String, String> {
+    // 双保险：oracle 与 --ssl 在解析层已互斥，直连本函数的调用方同样拒之门外（fail-closed）
+    if engine == Engine::Oracle && ssl {
+        return Err("--engine oracle 不支持 --ssl（TCPS 连接未支持）".to_string());
+    }
     // 密码两形式互斥；--password 参数或交互录入的明文都带回供回读解密校验用
     let (secret_line, entry_plain) = build_secret_line(password, password_env)?;
+    // 仅 oracle 落引擎行：缺省即 mysql，文件里不写冗余行
+    let engine_line = if engine == Engine::Oracle {
+        "engine=oracle\n"
+    } else {
+        ""
+    };
     let target = match file {
         Some(path) => path,
         None => {
@@ -136,13 +151,14 @@ fn add_with_sources(
         }
     };
     let section = format!(
-        "[{}]\nhost={}\nport={}\nuser={}\n{}database={}{}\n",
+        "[{}]\nhost={}\nport={}\nuser={}\n{}database={}{}{}\n",
         name,
         host,
         port,
         user,
         secret_line,
         database,
+        engine_line,
         if ssl { "\nssl=true" } else { "" }
     );
     // 跨文件同名预检：同名节只允许存在一处，落在其它文件时无论 update 与否都拒绝
@@ -197,9 +213,14 @@ fn add_with_sources(
         verify_readback_decrypts(profile, name, plain)?;
     }
     Ok(format!(
-        "[{}] 已写入 {}（回读校验通过）",
+        "[{}] 已写入 {}（回读校验通过）{}",
         name,
-        target.display()
+        target.display(),
+        if engine == Engine::Oracle {
+            " engine=oracle"
+        } else {
+            ""
+        }
     ))
 }
 
@@ -460,6 +481,7 @@ mod tests {
             true,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         assert!(msg.contains("回读校验通过"));
@@ -477,6 +499,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap_err();
         assert!(err.contains("已存在"));
@@ -492,6 +515,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
@@ -514,6 +538,7 @@ mod tests {
             false,
             None,
             false,
+            Engine::Mysql,
         )
         .unwrap_err();
         assert!(err.contains("仅允许"));
@@ -534,6 +559,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
@@ -558,6 +584,7 @@ mod tests {
             false,
             Some(temp_conf("penv-x")),
             false,
+            Engine::Mysql,
         )
         .unwrap_err();
         assert!(err.contains("二选一"), "报错应说明互斥：{}", err);
@@ -578,6 +605,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         add(
@@ -591,6 +619,7 @@ mod tests {
             true,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         let msg = add(
@@ -604,6 +633,7 @@ mod tests {
             true,
             Some(path.clone()),
             true,
+            Engine::Mysql,
         )
         .unwrap();
         assert!(msg.contains("回读校验通过"), "Ok 消息应含回读校验：{}", msg);
@@ -640,6 +670,7 @@ mod tests {
             false,
             Some(path.clone()),
             true,
+            Engine::Mysql,
         )
         .unwrap_err();
         assert!(err.contains("不存在"), "应说明节不存在：{}", err);
@@ -664,6 +695,7 @@ mod tests {
             false,
             Some(file_a.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         // 预检候选源注入文件 A：向文件 B 新增同名节应拒绝并指向 A
@@ -678,6 +710,7 @@ mod tests {
             false,
             Some(file_b.clone()),
             false,
+            Engine::Mysql,
             &[file_a.clone()],
         )
         .unwrap_err();
@@ -699,6 +732,7 @@ mod tests {
             false,
             Some(file_b.clone()),
             true,
+            Engine::Mysql,
             &[file_a.clone()],
         )
         .unwrap_err();
@@ -729,6 +763,7 @@ mod tests {
             false,
             Some(good.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         // 目标解析失败按不含同名节跳过，候选源命中照常返回
@@ -763,6 +798,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
@@ -815,6 +851,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap_err();
         assert!(
@@ -847,6 +884,7 @@ mod tests {
             false,
             Some(path.clone()),
             true,
+            Engine::Mysql,
         )
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
@@ -886,6 +924,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         assert!(
@@ -954,6 +993,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         let err = remove("solo", Some(path.clone()), false).unwrap_err();
@@ -972,6 +1012,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         add(
@@ -985,6 +1026,7 @@ mod tests {
             false,
             Some(path.clone()),
             false,
+            Engine::Mysql,
         )
         .unwrap();
         let err = remove("a1", Some(path.clone()), true).unwrap_err();
@@ -1005,6 +1047,7 @@ mod tests {
         .unwrap();
         add(
             "a", "h9", 3306, "u9", None, Some("V9"), "d9", false, Some(path.clone()), true,
+            Engine::Mysql,
         )
         .unwrap();
         let profiles = load_profiles(&path).unwrap();
@@ -1023,8 +1066,29 @@ mod tests {
     fn add_rejects_empty_password() {
         let err = add(
             "empty", "h", 3306, "u", Some(""), None, "d", false, Some(temp_conf("empty")), false,
+            Engine::Mysql,
         )
         .unwrap_err();
         assert!(err.contains("不能为空"), "应拒绝空密码：{}", err);
+    }
+
+    #[test]
+    fn add_writes_engine_line_for_oracle_and_refuses_ssl() {
+        let path = temp_conf("eng-add");
+        let _ = fs::remove_file(&path);
+        let msg = add_with_sources("demo", "h", 1521, "u", Some("p"), None, "FREEPDB1", false,
+            Some(path.clone()), false, Engine::Oracle, &[]).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("engine=oracle"), "应写入 engine 行：{}", text);
+        assert!(msg.contains("oracle"), "成功提示应含引擎：{}", msg);
+        // mysql 显式 engine 不写行（缺省即 mysql）
+        let path2 = temp_conf("eng-add-m");
+        add_with_sources("m", "h", 3306, "u", Some("p"), None, "d", false,
+            Some(path2.clone()), false, Engine::Mysql, &[]).unwrap();
+        assert!(!fs::read_to_string(&path2).unwrap().contains("engine="));
+        // oracle + ssl 拒绝
+        let err = add_with_sources("s", "h", 1521, "u", Some("p"), None, "d", true,
+            Some(temp_conf("eng-add-s")), false, Engine::Oracle, &[]).unwrap_err();
+        assert!(err.contains("ssl"), "应拒绝 oracle+ssl：{}", err);
     }
 }
