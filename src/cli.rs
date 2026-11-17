@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::config::Engine;
 use crate::render::OutputFormat;
 
 /// 默认最多输出行数（终端与存档共用上限）。
@@ -11,10 +12,26 @@ pub const DEFAULT_MAX_CELL: usize = 200;
 /// diff 不一致时差异样本默认行数（每侧，--sample 可调，0 关闭）。
 pub const DEFAULT_DIFF_SAMPLE: usize = 5;
 
+/// 快捷子命令的解析期意图：只记录"用户要什么"，不绑定 SQL 方言；
+/// profile 加载后由 [`materialize_sql`] 按引擎物化为具体 SQL。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shortcut {
+    /// `roq tables [模式]`：None 为不过滤。
+    Tables(Option<String>),
+    /// `roq schema <表|库.表>`。
+    Schema(String),
+    /// `roq columns <表|库.表> [列模式]`。
+    Columns(String, Option<String>),
+    /// `roq explain "SQL语句"`（片段已拼接为单条语句）。
+    Explain(String),
+}
+
 #[derive(Debug)]
 pub struct Cli {
     pub profile: String,
     pub sql: Option<String>,
+    /// 快捷子命令意图（tables/schema/columns/explain）：与 `sql` 恰有其一，由解析层保证。
+    pub shortcut: Option<Shortcut>,
     pub max_rows: usize,
     pub max_cell: usize,
     /// 用户是否显式传了 --max-cell（true 时 SHOW CREATE TABLE 的截断豁免不生效）。
@@ -142,14 +159,14 @@ pub fn usage() -> String {
         "  --config        配置文件或目录（目录=扫描其中 *.conf；默认 ~/.roq/profiles.conf + profiles.d/*.conf）".to_string(),
         "  --list          列出可用配置名".to_string(),
         String::new(),
-        "仅接受单条只读语句：SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES".to_string(),
+        "仅接受单条只读语句：SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES；engine=oracle 仅允许 SELECT / WITH（SHOW/DESC/EXPLAIN 为 MySQL/SQL*Plus 方言或会写入 PLAN_TABLE）".to_string(),
         "tsv：NULL 显示为 \\N，\\t \\n \\r 为转义序列；json：NULL 为 null（单元格不截断）；csv：NULL 为空字段。".to_string(),
     ]
     .join("\n")
 }
 
 /// 顶层解析：`config` / `log` / `tables` / `schema` / `explain` 开头走对应子命令，其余走查询。
-/// 快捷子命令只生成 SQL，随后与手写查询走同一条闸门+审计+存档链路。
+/// 快捷子命令解析期只存意图，物化为 SQL 后与手写查询走同一条闸门+审计+存档链路。
 pub fn parse_command(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
         Some("config") => Ok(Command::Config(parse_config_cmd(&args[1..])?)),
@@ -166,9 +183,9 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
 
 fn shortcut_tables(args: &[String]) -> Result<Command, String> {
     let (mut cli, positional) = parse_query_parts(args)?;
-    cli.sql = Some(match positional.as_slice() {
-        [] => "SHOW TABLES".to_string(),
-        [pattern] => format!("SHOW TABLES LIKE {}", like_pattern_literal(pattern)?),
+    cli.shortcut = Some(match positional.as_slice() {
+        [] => Shortcut::Tables(None),
+        [pattern] => Shortcut::Tables(Some(pattern.clone())),
         extra => {
             return Err(format!(
                 "tables 至多接受一个位置参数（过滤模式）：{}",
@@ -184,35 +201,24 @@ fn shortcut_schema(args: &[String]) -> Result<Command, String> {
     let [table] = positional.as_slice() else {
         return Err("schema 需要恰好一个表名（可用 库.表 两段）".to_string());
     };
-    cli.sql = Some(build_schema_sql(table)?);
+    cli.shortcut = Some(Shortcut::Schema(table.clone()));
     Ok(Command::Query(cli))
 }
 
-/// `roq columns`：SHOW FULL COLUMNS——字段/类型/可空/默认值/注释，比 schema 的完整 DDL 紧凑，
+/// `roq columns`：字段/类型/可空/默认值/注释，比 schema 的完整 DDL 紧凑，
 /// 带 COMMENT 列是排查时快速看懂表结构的首选。第二位置参数为列名过滤模式。
 fn shortcut_columns(args: &[String]) -> Result<Command, String> {
     let (mut cli, positional) = parse_query_parts(args)?;
-    match positional.as_slice() {
-        [table] => {
-            cli.sql = Some(format!(
-                "SHOW FULL COLUMNS FROM {}",
-                quoted_table_name(table)?
-            ));
-        }
-        [table, pattern] => {
-            cli.sql = Some(format!(
-                "SHOW FULL COLUMNS FROM {} LIKE {}",
-                quoted_table_name(table)?,
-                like_pattern_literal(pattern)?
-            ));
-        }
+    cli.shortcut = Some(match positional.as_slice() {
+        [table] => Shortcut::Columns(table.clone(), None),
+        [table, pattern] => Shortcut::Columns(table.clone(), Some(pattern.clone())),
         extra => {
             return Err(format!(
                 "columns 需要 1-2 个位置参数（表名 [列模式]，可用 库.表 两段）：{}",
                 extra.join(" ")
             ))
         }
-    }
+    });
     Ok(Command::Query(cli))
 }
 
@@ -221,21 +227,24 @@ fn shortcut_explain(args: &[String]) -> Result<Command, String> {
     if positional.is_empty() {
         return Err("explain 需要 SQL 语句".to_string());
     }
-    cli.sql = Some(format!("EXPLAIN {}", positional.join(" ")));
+    cli.shortcut = Some(Shortcut::Explain(positional.join(" ")));
     Ok(Command::Query(cli))
 }
 
+/// 表名段字符集校验：限字母/数字/下划线/$。mysql（反引号包裹）与 oracle（大写后单引号包裹）
+/// 物化共用同一套；校验过的段不含引号与反斜杠，两种字面量包裹后都无需再转义。
+fn valid_identifier(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
 /// 表名限字母/数字/下划线/$，或 `库.表` 两段；各段反引号包裹（兼容 order 这类保留字表名）。
-/// 校验失败即拒绝拼接，供 schema / columns 快捷子命令共用。
+/// 校验失败即拒绝拼接，供 mysql 物化（schema / columns）使用。
 fn quoted_table_name(table: &str) -> Result<String, String> {
-    let valid_segment = |seg: &str| {
-        !seg.is_empty()
-            && seg
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-    };
     let parts: Vec<&str> = table.split('.').collect();
-    if parts.len() > 2 || !parts.iter().all(|p| valid_segment(p)) {
+    if parts.len() > 2 || !parts.iter().all(|p| valid_identifier(p)) {
         return Err(format!(
             "表名 {} 不合法（仅允许字母/数字/下划线/$，或 库.表 两段）",
             table
@@ -247,6 +256,107 @@ fn quoted_table_name(table: &str) -> Result<String, String> {
 /// 生成 `SHOW CREATE TABLE`（完整 DDL）。
 fn build_schema_sql(table: &str) -> Result<String, String> {
     Ok(format!("SHOW CREATE TABLE {}", quoted_table_name(table)?))
+}
+
+/// oracle 表名物化为（表字面量，属主字面量）：两段 `属主.表` 时首段映射
+/// DBMS_METADATA.GET_DDL 第三参；字符集校验与 mysql 共用 [`valid_identifier`]，
+/// 段名大写后进单引号字面量（oracle 字典默认大写存储，校验过的标识符无需转义）。
+fn oracle_table_literals(table: &str) -> Result<(String, Option<String>), String> {
+    let parts: Vec<&str> = table.split('.').collect();
+    let literal = |seg: &str| format!("'{}'", seg.to_ascii_uppercase());
+    match parts.as_slice() {
+        [t] if valid_identifier(t) => Ok((literal(t), None)),
+        [owner, t] if valid_identifier(owner) && valid_identifier(t) => {
+            Ok((literal(t), Some(literal(owner))))
+        }
+        _ => Err(format!(
+            "表名 {} 不合法（仅允许字母/数字/下划线/$，或 库.表 两段）",
+            table
+        )),
+    }
+}
+
+/// 按引擎把快捷子命令意图物化为具体 SQL：mysql 与意图化改造前的输出逐字节一致，
+/// oracle 走 user_* 数据字典与 DBMS_METADATA；方言相关校验（表名字符集、过滤模式转义）在本层完成。
+pub fn materialize_sql(shortcut: &Shortcut, engine: Engine) -> Result<String, String> {
+    match engine {
+        Engine::Mysql => materialize_mysql(shortcut),
+        Engine::Oracle => materialize_oracle(shortcut),
+    }
+}
+
+/// mysql 物化：与意图化改造前快捷子命令生成的 SQL 逐字节一致（零行为变化）。
+fn materialize_mysql(shortcut: &Shortcut) -> Result<String, String> {
+    Ok(match shortcut {
+        Shortcut::Tables(None) => "SHOW TABLES".to_string(),
+        Shortcut::Tables(Some(pattern)) => {
+            format!("SHOW TABLES LIKE {}", like_pattern_literal(pattern)?)
+        }
+        Shortcut::Schema(table) => build_schema_sql(table)?,
+        Shortcut::Columns(table, None) => {
+            format!("SHOW FULL COLUMNS FROM {}", quoted_table_name(table)?)
+        }
+        Shortcut::Columns(table, Some(pattern)) => format!(
+            "SHOW FULL COLUMNS FROM {} LIKE {}",
+            quoted_table_name(table)?,
+            like_pattern_literal(pattern)?
+        ),
+        Shortcut::Explain(sql) => format!("EXPLAIN {}", sql),
+    })
+}
+
+/// oracle 物化：tables/columns 走 user_* 数据字典（仅当前 schema），schema 走 DBMS_METADATA；
+/// 过滤模式两侧 UPPER()——oracle 字典大写存储且 LIKE 大小写敏感，不 UPPER 会静默空集。
+/// EXPLAIN PLAN 会真实写入 PLAN_TABLE（DML），违反只读保障，生成前即拒绝（fail-closed）。
+fn materialize_oracle(shortcut: &Shortcut) -> Result<String, String> {
+    match shortcut {
+        Shortcut::Tables(None) => {
+            Ok("SELECT table_name FROM user_tables ORDER BY table_name".to_string())
+        }
+        Shortcut::Tables(Some(pattern)) => Ok(format!(
+            "SELECT table_name FROM user_tables WHERE UPPER(table_name) LIKE UPPER({}) ORDER BY table_name",
+            like_pattern_literal(pattern)?
+        )),
+        Shortcut::Schema(table) => {
+            let (table_literal, owner_literal) = oracle_table_literals(table)?;
+            match owner_literal {
+                Some(owner) => Ok(format!(
+                    "SELECT DBMS_METADATA.GET_DDL('TABLE', {}, {}) FROM dual",
+                    table_literal, owner
+                )),
+                None => Ok(format!(
+                    "SELECT DBMS_METADATA.GET_DDL('TABLE', {}) FROM dual",
+                    table_literal
+                )),
+            }
+        }
+        Shortcut::Columns(table, pattern) => {
+            let (table_literal, owner_literal) = oracle_table_literals(table)?;
+            // user_* 视图只覆盖当前 schema：带属主的两段名无法如实查询，显式拒绝而非静默空集
+            if owner_literal.is_some() {
+                return Err(format!(
+                    "oracle 的 columns 暂不支持 库.表 两段（user_* 字典视图仅覆盖当前 schema）：{}",
+                    table
+                ));
+            }
+            let filter = pattern
+                .as_ref()
+                .map(|p| {
+                    like_pattern_literal(p)
+                        .map(|lit| format!(" AND UPPER(c.column_name) LIKE UPPER({})", lit))
+                })
+                .transpose()?;
+            Ok(format!(
+                "SELECT c.column_name, c.data_type, c.data_length, c.data_precision, c.data_scale, c.nullable, c.data_default, cc.comments FROM user_tab_columns c LEFT JOIN user_col_comments cc ON cc.table_name = c.table_name AND cc.column_name = c.column_name WHERE c.table_name = {}{} ORDER BY c.column_id",
+                table_literal,
+                filter.as_deref().unwrap_or(""),
+            ))
+        }
+        Shortcut::Explain(_) => Err(
+            "Oracle 的 EXPLAIN PLAN 需写入 PLAN_TABLE（真实写入，违反只读保障），不支持 explain 子命令"
+                .to_string(),
+        ),
+    }
 }
 
 /// LIKE 模式进单引号字面量：显式含 % 时按 LIKE 通配符原样使用（t_report% 做前缀匹配），
@@ -523,6 +633,7 @@ fn parse_query_parts(args: &[String]) -> Result<(Cli, Vec<String>), String> {
     let mut cli = Cli {
         profile: "dev".to_string(),
         sql: None,
+        shortcut: None,
         max_rows: DEFAULT_MAX_ROWS,
         max_cell: DEFAULT_MAX_CELL,
         max_cell_explicit: false,
@@ -793,8 +904,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_shortcuts_generate_gated_sql() {
-        // tables → SHOW TABLES,且共用查询 flag
+    fn parse_command_shortcuts_store_intent() {
+        // tables：存意图且共用查询 flag（SQL 字面量见 materialize 物化测试）
         let Command::Query(cli) = parse_command(&[
             "tables".to_string(),
             "--format".to_string(),
@@ -803,61 +914,84 @@ mod tests {
         .unwrap() else {
             panic!("tables 应产出 Query 命令");
         };
-        assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES"));
+        assert_eq!(cli.shortcut, Some(Shortcut::Tables(None)));
         assert_eq!(cli.format, OutputFormat::Json);
-        // schema → SHOW CREATE TABLE(反引号防保留字)
+        // schema：表名原样存意图（表名合法性校验移至物化层，按引擎执行）
         let Command::Query(cli) =
             parse_command(&["schema".to_string(), "t_user".to_string()]).unwrap()
         else {
             panic!("schema 应产出 Query 命令");
         };
-        assert_eq!(cli.sql.as_deref(), Some("SHOW CREATE TABLE `t_user`"));
-        // columns → SHOW FULL COLUMNS(含字段注释,校验与 schema 同一套)
+        assert_eq!(cli.shortcut, Some(Shortcut::Schema("t_user".into())));
+        // columns：两段名原样保存
         let Command::Query(cli) =
             parse_command(&["columns".to_string(), "mydb.t_user".to_string()]).unwrap()
         else {
             panic!("columns 应产出 Query 命令");
         };
         assert_eq!(
-            cli.sql.as_deref(),
-            Some("SHOW FULL COLUMNS FROM `mydb`.`t_user`")
+            cli.shortcut,
+            Some(Shortcut::Columns("mydb.t_user".into(), None))
         );
-        assert!(parse_command(&["columns".to_string()]).is_err());
-        assert!(parse_command(&["columns".to_string(), "bad name".to_string()]).is_err());
-        // explain → EXPLAIN 前缀,片段拼接
+        // 非法表名解析期不再拒绝：意图照存，由物化层按引擎拒绝（见 materialize 测试）
+        let Command::Query(cli) =
+            parse_command(&["columns".to_string(), "bad name".to_string()]).unwrap()
+        else {
+            panic!("columns 应产出 Query 命令");
+        };
+        assert_eq!(
+            cli.shortcut,
+            Some(Shortcut::Columns("bad name".into(), None))
+        );
+        let Command::Query(cli) =
+            parse_command(&["schema".to_string(), "bad name".to_string()]).unwrap()
+        else {
+            panic!("schema 应产出 Query 命令");
+        };
+        assert_eq!(cli.shortcut, Some(Shortcut::Schema("bad name".into())));
+        // explain：多片段拼接为单条语句意图
         let Command::Query(cli) =
             parse_command(&["explain".to_string(), "SELECT".to_string(), "1".to_string()]).unwrap()
         else {
             panic!("explain 应产出 Query 命令");
         };
-        assert_eq!(cli.sql.as_deref(), Some("EXPLAIN SELECT 1"));
-        // 错误形态:参数个数与非法表名
+        assert_eq!(cli.shortcut, Some(Shortcut::Explain("SELECT 1".into())));
+        // 错误形态：参数个数与引擎无关，仍在解析期拒绝
         assert!(parse_command(&["tables".to_string(), "多余".to_string(), "更多".to_string()]).is_err());
         assert!(parse_command(&["schema".to_string()]).is_err());
-        assert!(parse_command(&["schema".to_string(), "bad name".to_string()]).is_err());
+        assert!(parse_command(&["columns".to_string()]).is_err());
         assert!(parse_command(&["explain".to_string()]).is_err());
     }
 
     #[test]
-    fn tables_with_pattern_builds_show_tables_like() {
+    fn tables_with_pattern_stores_pattern_intent() {
         match parse_command(&["tables".to_string(), "mark".to_string()]) {
-            Ok(Command::Query(cli)) => assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE '%mark%'")),
+            Ok(Command::Query(cli)) => assert_eq!(
+                cli.shortcut,
+                Some(Shortcut::Tables(Some("mark".into())))
+            ),
             _ => panic!("tables 带模式应产出 Query 命令"),
         }
     }
 
     #[test]
-    fn tables_with_percent_keeps_pattern_verbatim() {
+    fn tables_with_percent_stores_verbatim_pattern() {
         match parse_command(&["tables".to_string(), "t_report%".to_string()]) {
-            Ok(Command::Query(cli)) => assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE 't_report%'")),
+            Ok(Command::Query(cli)) => assert_eq!(
+                cli.shortcut,
+                Some(Shortcut::Tables(Some("t_report%".into())))
+            ),
             _ => panic!(),
         }
     }
 
     #[test]
-    fn tables_with_snake_case_searches_substring() {
+    fn tables_with_snake_case_stores_substring_pattern() {
         match parse_command(&["tables".to_string(), "t_user".to_string()]) {
-            Ok(Command::Query(cli)) => assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE '%t_user%'")),
+            Ok(Command::Query(cli)) => assert_eq!(
+                cli.shortcut,
+                Some(Shortcut::Tables(Some("t_user".into())))
+            ),
             _ => panic!(),
         }
     }
@@ -866,7 +1000,9 @@ mod tests {
     fn tables_pattern_escapes_single_quote_and_passes_gate() {
         match parse_command(&["tables".to_string(), "a'b".to_string()]) {
             Ok(Command::Query(cli)) => {
-                let sql = cli.sql.expect("应有 SQL");
+                assert_eq!(cli.shortcut, Some(Shortcut::Tables(Some("a'b".into()))));
+                let sql = materialize_sql(cli.shortcut.as_ref().unwrap(), Engine::Mysql)
+                    .expect("应物化成功");
                 assert_eq!(sql, "SHOW TABLES LIKE '%a''b%'");
                 assert!(crate::gate::gate(&sql).is_ok(), "生成 SQL 应能过闸门：{sql}");
             }
@@ -880,21 +1016,21 @@ mod tests {
     }
 
     #[test]
-    fn columns_with_pattern_appends_like() {
+    fn columns_with_pattern_stores_filter_intent() {
         match parse_command(&["columns".to_string(), "t_user".to_string(), "task_num".to_string()]) {
             Ok(Command::Query(cli)) => assert_eq!(
-                cli.sql.as_deref(),
-                Some("SHOW FULL COLUMNS FROM `t_user` LIKE '%task_num%'")
+                cli.shortcut,
+                Some(Shortcut::Columns("t_user".into(), Some("task_num".into())))
             ),
             _ => panic!(),
         }
     }
 
     #[test]
-    fn columns_without_pattern_unchanged() {
+    fn columns_without_pattern_stores_bare_intent() {
         match parse_command(&["columns".to_string(), "t_user".to_string()]) {
             Ok(Command::Query(cli)) => {
-                assert_eq!(cli.sql.as_deref(), Some("SHOW FULL COLUMNS FROM `t_user`"))
+                assert_eq!(cli.shortcut, Some(Shortcut::Columns("t_user".into(), None)))
             }
             _ => panic!(),
         }
@@ -908,18 +1044,18 @@ mod tests {
 
     #[test]
     fn tables_pattern_rejects_backslash() {
-        let err = parse_command(&["tables".to_string(), "a\\b".to_string()]).unwrap_err();
+        // 反斜杠拒绝属方言校验，随物化层按引擎执行：解析层只存意图
+        let err = materialize_sql(&Shortcut::Tables(Some("a\\b".into())), Engine::Mysql).unwrap_err();
         assert!(err.contains("反斜杠"), "报错应说明反斜杠：{err}");
     }
 
     #[test]
     fn columns_pattern_rejects_backslash() {
         assert!(
-            parse_command(&[
-                "columns".to_string(),
-                "t_user".to_string(),
-                "a\\b".to_string()
-            ])
+            materialize_sql(
+                &Shortcut::Columns("t_user".into(), Some("a\\b".into())),
+                Engine::Mysql
+            )
             .is_err()
         );
     }
@@ -928,11 +1064,91 @@ mod tests {
     fn tables_pattern_coexists_with_flags() {
         match parse_command(&["tables".to_string(), "mark".to_string(), "--format".to_string(), "json".to_string()]) {
             Ok(Command::Query(cli)) => {
-                assert_eq!(cli.sql.as_deref(), Some("SHOW TABLES LIKE '%mark%'"));
+                assert_eq!(cli.shortcut, Some(Shortcut::Tables(Some("mark".into()))));
                 assert!(matches!(cli.format, OutputFormat::Json));
             }
             _ => panic!(),
         }
+    }
+
+    /// `sql` 与 `shortcut` 恰有其一：手写查询只填 sql，快捷子命令只填 shortcut（解析层保证）。
+    #[test]
+    fn cli_sql_and_shortcut_are_mutually_exclusive() {
+        let Command::Query(cli) = parse_command(&["SELECT 1".to_string()]).unwrap() else {
+            panic!("应产出 Query 命令");
+        };
+        assert_eq!(cli.sql.as_deref(), Some("SELECT 1"));
+        assert_eq!(cli.shortcut, None);
+        let Command::Query(cli) = parse_command(&["tables".to_string()]).unwrap() else {
+            panic!("tables 应产出 Query 命令");
+        };
+        assert_eq!(cli.sql, None);
+        assert!(cli.shortcut.is_some());
+    }
+
+    #[test]
+    fn materialize_mysql_matches_legacy_output() {
+        // 与改造前生成的 SQL 逐字节一致（快捷子命令 mysql 行为零变化）
+        let cases = [
+            (Shortcut::Tables(None), "SHOW TABLES"),
+            (Shortcut::Tables(Some("%mark%".into())), "SHOW TABLES LIKE '%mark%'"),
+            (Shortcut::Schema("t_user".into()), "SHOW CREATE TABLE `t_user`"),
+            (Shortcut::Schema("mydb.t_user".into()), "SHOW CREATE TABLE `mydb`.`t_user`"),
+            (Shortcut::Columns("t".into(), None), "SHOW FULL COLUMNS FROM `t`"),
+            (Shortcut::Explain("SELECT 1".into()), "EXPLAIN SELECT 1"),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(materialize_sql(&s, Engine::Mysql).unwrap(), expected);
+        }
+        // 非法表名仍在物化层拒绝
+        assert!(materialize_sql(&Shortcut::Schema("bad name".into()), Engine::Mysql).is_err());
+        assert!(materialize_sql(&Shortcut::Tables(Some("a\\b".into())), Engine::Mysql).is_err());
+    }
+
+    /// 迁移自既有解析期断言的字节级期望：brief 主测试未覆盖的模式变体，覆盖不得丢失。
+    #[test]
+    fn materialize_mysql_pattern_variants_match_legacy() {
+        let cases = [
+            // 子串自动包 %（含 snake_case）
+            (Shortcut::Tables(Some("mark".into())), "SHOW TABLES LIKE '%mark%'"),
+            (Shortcut::Tables(Some("t_user".into())), "SHOW TABLES LIKE '%t_user%'"),
+            // 显式 % 按通配符原样使用
+            (Shortcut::Tables(Some("t_report%".into())), "SHOW TABLES LIKE 't_report%'"),
+            (Shortcut::Columns("t_user".into(), None), "SHOW FULL COLUMNS FROM `t_user`"),
+            (Shortcut::Columns("mydb.t_user".into(), None), "SHOW FULL COLUMNS FROM `mydb`.`t_user`"),
+            (
+                Shortcut::Columns("t_user".into(), Some("task_num".into())),
+                "SHOW FULL COLUMNS FROM `t_user` LIKE '%task_num%'",
+            ),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(materialize_sql(&s, Engine::Mysql).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn materialize_oracle_generates_dictionary_sql_and_refuses_explain() {
+        let cases = [
+            (Shortcut::Tables(None), "SELECT table_name FROM user_tables ORDER BY table_name"),
+            (Shortcut::Tables(Some("mark".into())),
+             "SELECT table_name FROM user_tables WHERE UPPER(table_name) LIKE UPPER('%mark%') ORDER BY table_name"),
+            (Shortcut::Schema("t_user".into()),
+             "SELECT DBMS_METADATA.GET_DDL('TABLE', 'T_USER') FROM dual"),
+            (Shortcut::Schema("other.t_user".into()),
+             "SELECT DBMS_METADATA.GET_DDL('TABLE', 'T_USER', 'OTHER') FROM dual"),
+            (Shortcut::Columns("t_user".into(), None),
+             "SELECT c.column_name, c.data_type, c.data_length, c.data_precision, c.data_scale, c.nullable, c.data_default, cc.comments FROM user_tab_columns c LEFT JOIN user_col_comments cc ON cc.table_name = c.table_name AND cc.column_name = c.column_name WHERE c.table_name = 'T_USER' ORDER BY c.column_id"),
+            (Shortcut::Columns("t_user".into(), Some("obj".into())),
+             "SELECT c.column_name, c.data_type, c.data_length, c.data_precision, c.data_scale, c.nullable, c.data_default, cc.comments FROM user_tab_columns c LEFT JOIN user_col_comments cc ON cc.table_name = c.table_name AND cc.column_name = c.column_name WHERE c.table_name = 'T_USER' AND UPPER(c.column_name) LIKE UPPER('%obj%') ORDER BY c.column_id"),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(materialize_sql(&s, Engine::Oracle).unwrap(), expected);
+        }
+        // Oracle 拒绝 explain（EXPLAIN PLAN 真实写 PLAN_TABLE）
+        let err = materialize_sql(&Shortcut::Explain("SELECT 1".into()), Engine::Oracle).unwrap_err();
+        assert!(err.contains("PLAN_TABLE"), "拒绝文案应说明原因：{}", err);
+        // oracle 表名校验沿用同一字符集（反引号不存在于 oracle）
+        assert!(materialize_sql(&Shortcut::Schema("bad name".into()), Engine::Oracle).is_err());
     }
 
     #[test]

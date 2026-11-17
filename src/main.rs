@@ -5,7 +5,7 @@ use std::env;
 use std::process::ExitCode;
 
 use roq::audit::{append_audit_log, audit_line, json_escape};
-use roq::cli::{parse_command, Cli, Command};
+use roq::cli::{materialize_sql, parse_command, Cli, Command};
 use roq::cmd_config;
 use roq::cmd_diff;
 use roq::cmd_log;
@@ -53,9 +53,39 @@ fn run_query(cli: Cli) -> ExitCode {
         print_profiles(&profiles);
         return ExitCode::from(0);
     }
-    let Some(sql) = cli.sql.clone() else {
-        eprintln!("缺少 SQL 语句。运行 roq --help 查看用法。");
+    // profile 查找前移：快捷子命令的物化与后续闸门的引擎感知都需要 profile
+    let start = std::time::Instant::now();
+    let Some(profile) = profiles.get(&cli.profile) else {
+        eprintln!("配置 [{}] 不存在。--list 查看全部。", cli.profile);
+        append_audit_log(&audit_line(
+            &cli.profile,
+            "",
+            "",
+            0,
+            false,
+            start.elapsed().as_millis(),
+            "config-error",
+            ",\"reason\":\"profile-missing\"",
+            "",
+        ));
         return ExitCode::from(EXIT_USAGE);
+    };
+    // 手写 SQL 原样直取；快捷子命令按 profile 引擎物化为具体 SQL。
+    // 物化失败（表名/过滤模式不合法、oracle explain）按用法错误处理并落审计。
+    let sql = match &cli.sql {
+        Some(sql) => sql.clone(),
+        None => match cli.shortcut.as_ref() {
+            Some(s) => match materialize_sql(s, profile.engine) {
+                Ok(sql) => sql,
+                Err(msg) => {
+                    eprintln!("[roq] {}", msg);
+                    append_audit_log(&audit_line(&cli.profile, "", "", 0, false, 0,
+                        "config-error", &format!(",\"reason\":\"{}\"", json_escape(&msg)), ""));
+                    return ExitCode::from(EXIT_USAGE);
+                }
+            },
+            None => { eprintln!("缺少 SQL 语句。运行 roq --help 查看用法。"); return ExitCode::from(EXIT_USAGE); }
+        },
     };
     let sql = match gate(&sql) {
         Ok(sql) => sql,
@@ -74,22 +104,6 @@ fn run_query(cli: Cli) -> ExitCode {
             ));
             return ExitCode::from(EXIT_GATE_REJECTED);
         }
-    };
-    let start = std::time::Instant::now();
-    let Some(profile) = profiles.get(&cli.profile) else {
-        eprintln!("配置 [{}] 不存在。--list 查看全部。", cli.profile);
-        append_audit_log(&audit_line(
-            &cli.profile,
-            "",
-            &sql,
-            0,
-            false,
-            start.elapsed().as_millis(),
-            "config-error",
-            ",\"reason\":\"profile-missing\"",
-            "",
-        ));
-        return ExitCode::from(EXIT_USAGE);
     };
     query::execute(&cli, profile, &sql)
 }
