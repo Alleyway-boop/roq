@@ -139,7 +139,7 @@ pub enum ConfigCmd {
 
 pub fn usage() -> String {
     [
-        "roq —— 只读 MySQL 查询工具".to_string(),
+        "roq —— 只读数据库查询工具（MySQL / Oracle）".to_string(),
         String::new(),
         "用法: roq [--profile 名] [--max-rows N] [--max-cell N] [--config 路径] [--list] \"SQL语句\"".to_string(),
         "      roq tables [模式] [--profile 名 ...]              # SHOW TABLES 快捷方式（子串自动包 %，显式 % 按通配符）".to_string(),

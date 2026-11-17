@@ -1,16 +1,16 @@
 # roq
 
-> **A read-only MySQL client you can point at production without fear.**
+> **Read-only SQL for MySQL and Oracle — point it at production without fear.**
 
 Read this in: [简体中文](README.zh-CN.md)
 
 [![Release](https://img.shields.io/github/v/release/Alleyway-boop/roq)](https://github.com/Alleyway-boop/roq/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-`roq` is a command-line query tool for MySQL in which write operations are impossible — not by
-policy, but by construction. Three independent read-only layers stand between your terminal and
-the database, every invocation is audited and archived, and the whole thing ships as a single
-~2.5 MB static binary with no runtime dependencies.
+`roq` is a command-line query tool for MySQL and Oracle in which write operations are impossible —
+not by policy, but by construction. Three independent read-only layers stand between your terminal
+and the database, every invocation is audited and archived, and the whole thing ships as a single
+~3.3 MB static binary with no runtime dependencies.
 
 It is built for incident investigation and data verification on production, staging, and
 development databases — used by humans directly, and by AI agents through a bundled skill.
@@ -22,6 +22,8 @@ development databases — used by humans directly, and by AI agents through a bu
 
 - **Read-only by construction** — a local statement gate, a server-side `READ ONLY` session
   (verified by read-back), and output caps. Even rejected or failed attempts leave an audit trail.
+- **Two engines, one gate** — MySQL and Oracle in the same binary; Oracle profiles use the official
+  pure-Rust thin driver (no Instant Client) with engine-specific gate and session hardening.
 - **Audited and archived** — every invocation is logged to a monthly JSONL audit log; full results
   are always archived to disk, even when the terminal display is truncated.
 - **Agent-ready** — `roq skill install` teaches Claude Code / Codex CLI how to use roq correctly
@@ -30,7 +32,7 @@ development databases — used by humans directly, and by AI agents through a bu
   environment-variable credentials on Linux/macOS/CI.
 - **Reconciliation built in** — `roq diff` runs one SQL statement on two profiles and reports
   mismatches with sample diff rows.
-- **Single static binary** — written in Rust, ~2.5 MB, zero runtime dependencies.
+- **Single static binary** — written in Rust, ~3.3 MB, zero runtime dependencies.
 
 ## Installation
 
@@ -96,7 +98,8 @@ gate + audit + archive pipeline as hand-written queries.
 
 Exactly **one** statement per invocation, whose first keyword is one of
 `SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`.
-Anything else is rejected before touching the network.
+Anything else is rejected before touching the network. On Oracle profiles the whitelist narrows
+to `SELECT` / `WITH` — see [Oracle support](#oracle-support).
 
 ### Output formats (`--format`, default `tsv`)
 
@@ -198,17 +201,55 @@ Writing the INI files by hand is still supported:
 ```ini
 [name]
 host=db.example.com
-port=3306            ; optional, default 3306
+port=3306            ; optional, default 3306 (1521 for engine=oracle)
 user=roq_ro
 password=secret      ; or password_env (the two are mutually exclusive)
 password_env=VAR     ; password read from this environment variable; unset ⇒ error before connect
 database=mydb
-ssl=true             ; optional: TLS encryption (certificate not verified)
+engine=mysql         ; optional: engine=oracle switches the profile to Oracle
+ssl=true             ; optional: TLS encryption (certificate not verified; not supported with oracle)
 ```
 
 `--config PATH` accepts a file or a directory (directories are scanned for `*.conf` in name
 order). If the server rejects TLS (`Client requires secure connection`), remove `ssl=true` —
 that endpoint does not support it.
+
+## Oracle support
+
+Profiles with `engine=oracle` run the same three-layer read-only pipeline against Oracle
+Database (**12 or newer**) through the official pure-Rust **thin driver** — no Instant Client,
+no Oracle client libraries, nothing to install. `engine=mysql` (or no engine line at all)
+keeps the MySQL path, byte-for-byte unchanged.
+
+```bash
+# database = service name; default port 1521
+roq config add myproj-oracle --host your-host --user roq_ro --password '***' --database FREEPDB1 --engine oracle
+roq config test myproj-oracle
+roq tables --profile myproj-oracle
+```
+
+- TCPS (`ssl=true`) is **not** supported with Oracle and is rejected when the config loads
+  (fail-closed — never silently ignored).
+- **Gate**: the first-keyword whitelist narrows to `SELECT` / `WITH` (`SHOW`/`DESC` are MySQL /
+  SQL*Plus dialect). Dialect-aware scanning: `#` is an ordinary character (`OBJ#` is a legal
+  column name), `--` comments out immediately, backslashes inside string literals are literal,
+  backticks are rejected. The forbidden-word scan is shared with MySQL.
+- **Session hardening**: `SET TRANSACTION READ ONLY` — the Oracle protocol guarantees the
+  statement cannot be silently ignored, so no read-back assertion is needed; a 60-second call
+  timeout stands in for `max_execution_time`.
+- **Shortcut mapping** (same gate + audit + archive pipeline on both engines):
+
+  | Command | MySQL | Oracle |
+  |---|---|---|
+  | `roq tables [PATTERN]` | `SHOW TABLES` | `SELECT ... FROM user_tables` (current schema; pattern matched case-insensitively) |
+  | `roq columns <table> [PATTERN]` | `SHOW FULL COLUMNS` | `user_tab_columns` + `user_col_comments`; owner-qualified names rejected — the views cover the current schema only |
+  | `roq schema <table\|db.table>` | `SHOW CREATE TABLE` | `DBMS_METADATA.GET_DDL` (`owner.table` maps to the owner argument); exempt from cell truncation |
+  | `roq explain "SQL"` | `EXPLAIN ...` | **rejected** — `EXPLAIN PLAN` really writes `PLAN_TABLE` |
+
+- `roq diff` **refuses cross-engine comparisons** (MySQL profile vs Oracle profile errors out —
+  gate semantics and type treatment differ, so numbers would be misleading).
+- Audit lines record the profile's `engine`; `roq log` displays it and stays compatible with
+  entries written before this field existed.
 
 ## Security model: three read-only layers
 
@@ -226,7 +267,9 @@ that endpoint does not support it.
 2. **Server-side read-only session** — after connecting, roq issues
    `SET SESSION TRANSACTION READ ONLY` and **asserts the flag by reading it back**
    (`@@session.transaction_read_only` must be `1`; SET failure, read-back failure, or a wrong
-   value all abort the query), and sets a 30-second `max_execution_time` fuse.
+   value all abort the query), and sets a 30-second `max_execution_time` fuse. Oracle profiles
+   get the equivalent `SET TRANSACTION READ ONLY` — see
+   [Oracle support](#oracle-support).
 3. **Output caps** — row and cell limits keep large results from flooding the terminal; cell
    escapes preserve both fidelity and single-line TSV structure.
 
@@ -235,7 +278,8 @@ that endpoint does not support it.
 Automatic and **cannot be disabled** — this is the tool's ledger of record.
 
 - **Audit log**: `~/.roq/logs/roq-YYYYMM.jsonl`, one JSON line per invocation:
-  `ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`. Outcomes include
+  `ts / profile / engine / db / sql / rows / truncated / ms / outcome / reason / result`.
+  Outcomes include
   `ok`, `gate-rejected` (with the rejection reason), `connect-error`, `exec-error`,
   `config-error` — rejected attempts are logged too. Query it with `roq log` (defaults to
   today; `--month` / `--last N` for wider views).
@@ -247,7 +291,8 @@ Automatic and **cannot be disabled** — this is the tool's ledger of record.
 
 ## Roadmap
 
-- [ ] More database drivers: PostgreSQL / SQLite (`driver=` profile field, dialect-aware gate)
+- [ ] More database drivers: PostgreSQL / SQLite (extending the existing `engine=` profile field
+      and dialect-aware gate)
 - [ ] Config-free one-shot connections: `--dsn "mysql://user:pass@host/db"`
 
 Release history: see [CHANGELOG.md](CHANGELOG.md).

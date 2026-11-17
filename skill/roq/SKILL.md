@@ -1,7 +1,7 @@
 ---
 name: roq
 description: >-
-  Use the roq CLI for ALL MySQL database lookups — row counts, data verification,
+  Use the roq CLI for ALL MySQL and Oracle database lookups — row counts, data verification,
   schema peeks, prod/test/dev incident investigation.
   当需要查库、核对数据、排查生产/测试/开发库、执行 SELECT/SHOW/EXPLAIN 时使用本技能。
   Never write ad-hoc DB access scripts (jshell/Python/JDBC/mysql client) — roq enforces
@@ -10,7 +10,7 @@ description: >-
 
 # roq — 只读数据库查询
 
-所有 MySQL 查询一律通过 `roq` 完成，禁止现写任何直连数据库的脚本（jshell/Python/JDBC 等）。
+所有数据库查询（MySQL / Oracle）一律通过 `roq` 完成，禁止现写任何直连数据库的脚本（jshell/Python/JDBC 等）。
 roq 在本地闸门、服务端会话只读、输出限额三层强制只读；安全行为由仓库内 `cargo test` 全量单测（含注入负例）常驻保障，改工具代码必须先过测试。
 
 ## 安装与就绪检查
@@ -34,7 +34,7 @@ roq [--profile 名] [--format tsv|json|csv] [--max-rows N] "单条只读SQL"
 - 排查起点用快捷命令：`roq tables`（看有哪些表；带模式即模糊过滤——`roq tables mark` 子串自动包 %，`roq tables t_report%` 前缀匹配）→ `roq columns t_xxx`（字段/类型/注释，比 schema 紧凑，看懂表首选；`roq columns t_xxx task` 可过滤列名）→ 需要完整 DDL 再 `roq schema t_xxx`；`roq explain "..."` 看执行计划
 - 两库对账用 `roq diff --profile 左 --profile 右 "SQL"`（比对列名/行数/行多重集摘要；不一致时直接给出两侧差异行样本，默认各 5 行、`--sample N` 调整；`--json` 出机器可读结论；exit=4 表示不一致）
 - 大结果 `--out 文件`（替代终端输出与自动存档）；查审计用 `roq log --last 20` / `--outcome gate-rejected`
-- 仅接受单条：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`
+- 仅接受单条：`SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`（`engine=oracle` 收窄为 `SELECT / WITH`，见 Oracle 一节）
 - tsv 格式：首行列名；`NULL` 显示为 `\N`；`\t \n \r` 转义为可见序列（保真且单行）
 - 默认限额 500 行（`--max-rows`）；tsv 终端单格 200 字符（`--max-cell`；json/csv 与存档不截断；`SHOW CREATE TABLE` 免截断，显式传 `--max-cell` 除外）
 - 退出码：`0` 成功 / `1` 用法配置错 / `2` 闸门拒绝 / `3` 连接执行错 / `4` diff 不一致
@@ -84,6 +84,23 @@ SELECT 权限的专用账号（`GRANT SELECT ON 目标库.* TO 'roq_ro'@'%'`，�
 - `EXPLAIN ANALYZE` 被拒（会真执行）；只可用普通 `EXPLAIN`
 - `SHOW CREATE TABLE` 可用（SHOW 系列跳过禁词扫描）
 
+## Oracle（engine=oracle）
+
+profile 声明 `engine=oracle` 即走 Oracle（要求 Oracle Database ≥ 12；thin 驱动纯 Rust 直连，
+无需安装 Instant Client 或任何客户端库）。未声明 `engine` 或显式 `engine=mysql` 走 MySQL，
+既有行为零变化。
+
+- 注册：`roq config add <项目>-ora --host your-host --user roq_ro --password 密码 --database FREEPDB1 --engine oracle`——`database` 填服务名（service_name），端口缺省 1521；手工 INI 加一行 `engine=oracle`。oracle 与 `--ssl`/`ssl=true` 互斥（TCPS 未支持，配置加载即拒绝）
+- 白名单收窄：仅接受 `SELECT / WITH` 开头的单条语句——`SHOW`/`DESC`/`DESCRIBE` 是 MySQL/SQL*Plus 方言，看表结构用 `SELECT ... FROM user_tables` 等数据字典视图或下面的快捷子命令
+- 快捷子命令等价行为（生成 SQL 后走同一闸门+审计+存档链路）：
+  - `roq tables [模式]` → 查 `user_tables`（仅当前 schema；模式过滤两侧自动转大写匹配）
+  - `roq columns <表> [列模式]` → 查 `user_tab_columns` + `user_col_comments`（字段/类型/长度/精度/可空/默认值/注释；不支持 `属主.表` 两段名——user_* 视图仅覆盖当前 schema，显式报错而非静默空集）
+  - `roq schema <表|属主.表>` → `DBMS_METADATA.GET_DDL`（完整 DDL，免单格截断；两段名的首段映射为 GET_DDL 的属主参数）
+  - `roq explain` → **不支持**：`EXPLAIN PLAN` 会真实写入 PLAN_TABLE（写操作，违反只读保障），生成前即拒绝（exit=2）
+- 会话只读：连接后执行 `SET TRANSACTION READ ONLY`（Oracle 协议保证该 SET 不被静默忽略），另有 60 秒 call timeout 兜底慢查询
+- `roq diff` 拒绝跨引擎比对（mysql 与 oracle 的 profile 互比直接报错）——闸门语义与类型口径不同，比对结果无意义
+- 审计行含 `engine` 字段（"mysql"/"oracle"），`roq log` 照常展示，历史无 engine 的行也兼容
+
 ## 常见模式
 
 ```bash
@@ -116,5 +133,6 @@ json 输出截断信息看顶层 `"truncated"`；长文本字段先 `LEFT(col, N
 ## 故障排查
 
 - exit=3 `Client requires secure connection`：该端点不支持 TLS，去掉配置里的 `ssl=true`
+- Oracle 连接报 ORA-12514/ORA-12505：`database` 应为服务名（service_name）而非 SID，向 DBA 确认监听注册的服务名后重试
 - 终端中文乱码：roq 启动时已自动把 Windows 控制台切到 UTF-8 代码页；仍乱码多为终端自身字体/编码设置，数据本身是 UTF-8，管道/重定向不受影响
 - profile 不存在：先 `--list` 确认名称与来源

@@ -1,14 +1,14 @@
 # roq
 
-> **可以放心指向生产库的只读 MySQL 客户端。**
+> **MySQL / Oracle 双引擎只读 SQL 客户端，可以放心指向生产库。**
 
 其他语言：[English](README.md)
 
 [![Release](https://img.shields.io/github/v/release/Alleyway-boop/roq)](https://github.com/Alleyway-boop/roq/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-`roq` 是一个命令行 MySQL 查询工具——**写操作在构造层面就不可能发生**，而非靠约定。终端与数据库
-之间隔着三层相互独立的只读防护，每次调用都留审计与存档，整体以单个约 2.5 MB 的静态二进制交付，
+`roq` 是一个命令行 MySQL / Oracle 查询工具——**写操作在构造层面就不可能发生**，而非靠约定。终端与数据库
+之间隔着三层相互独立的只读防护，每次调用都留审计与存档，整体以单个约 3.3 MB 的静态二进制交付，
 无任何运行时依赖。
 
 它为生产 / 测试 / 开发库的排查与数据核对而生——人直接用，AI agent 通过随附技能用。
@@ -17,12 +17,14 @@
 
 - **构造级只读**——本地语句闸门、服务端 `READ ONLY` 会话（回读断言）、输出限额三层层层设防；
   被拒或失败的尝试同样留痕。
+- **双引擎同闸门**——MySQL 与 Oracle 同一二进制；Oracle 走官方纯 Rust thin 驱动（无需 Instant
+  Client），闸门与会话加固按引擎分流。
 - **审计与存档**——每次调用写入按月滚动的 JSONL 审计日志；结果全量落盘，终端显示截断也不影响存档。
 - **Agent 友好**——`roq skill install` 让 Claude Code / Codex CLI 在任意项目正确使用 roq；
   `--format json --quiet` 输出单文档便于机器消费。
 - **凭据落盘即密**——Windows 上 DPAPI 加密绑定本机用户；Linux/macOS/CI 走环境变量凭据。
 - **内置对账**——`roq diff` 同一条 SQL 跑两个 profile，不一致时给出差异行样本。
-- **单静态二进制**——Rust 编写，约 2.5 MB，零运行时依赖。
+- **单静态二进制**——Rust 编写，约 3.3 MB，零运行时依赖。
 
 ## 安装
 
@@ -82,7 +84,8 @@ roq skill install [--global|--project|--codex] [--force]
 
 每次调用仅接受**单条**语句，首关键词必须是
 `SELECT / SHOW / EXPLAIN / DESC / DESCRIBE / WITH / TABLE / VALUES`，
-其余一律在触网前拒绝。
+其余一律在触网前拒绝。Oracle profile 白名单收窄为 `SELECT` / `WITH`——见
+[Oracle 支持](#oracle-支持)。
 
 ### 输出格式（`--format`，默认 `tsv`）
 
@@ -169,16 +172,49 @@ GRANT SELECT ON 目标库.* TO 'roq_ro'@'%';
 ```ini
 [名称]
 host=db.example.com
-port=3306            ; 可选，缺省 3306
+port=3306            ; 可选，缺省 3306（engine=oracle 为 1521）
 user=roq_ro
 password=密码        ; 或 password_env（两者互斥，并存报错）
 password_env=变量名  ; 密码从该环境变量读；未设置时连接前报错（不回退明文）
 database=库名
-ssl=true             ; 可选：TLS 加密（不校验证书）
+engine=mysql         ; 可选：engine=oracle 把该配置切到 Oracle
+ssl=true             ; 可选：TLS 加密（不校验证书；oracle 不支持）
 ```
 
 `--config 路径` 接受文件或目录（目录则扫描其中 `*.conf`，按文件名排序加载）。服务端不支持 TLS 报
 `Client requires secure connection` 时，去掉 `ssl=true` 即可。
+
+## Oracle 支持
+
+profile 声明 `engine=oracle` 即以同一套三层只读管线访问 Oracle Database（要求 **12 及以上**），
+走官方纯 Rust **thin 驱动**——无需 Instant Client、无需任何 Oracle 客户端库。声明 `engine=mysql`
+或不写 engine 行都保持 MySQL 路径，行为逐字节不变。
+
+```bash
+# database 填服务名（service_name）；端口缺省 1521
+roq config add myproj-oracle --host your-host --user roq_ro --password '***' --database FREEPDB1 --engine oracle
+roq config test myproj-oracle
+roq tables --profile myproj-oracle
+```
+
+- Oracle **不支持** TCPS（`ssl=true`），配置加载时即拒绝（fail-closed，绝不静默忽略）。
+- **闸门**：首关键词白名单收窄为 `SELECT` / `WITH`（`SHOW`/`DESC` 是 MySQL/SQL*Plus 方言）。
+  扫描语义按方言分流：`#` 是普通字符（`OBJ#` 等合法列名不误伤）、`--` 立即注释、字符串内反斜杠
+  为字面量、反引号拒绝。禁词扫描与 MySQL 共用。
+- **会话加固**：`SET TRANSACTION READ ONLY`——Oracle 协议保证该语句不被静默忽略，无需回读断言；
+  60 秒 call timeout 充当 `max_execution_time` 的对应保险丝。
+- **快捷子命令对照**（两引擎走同一闸门 + 审计 + 存档链路）：
+
+  | 命令 | MySQL | Oracle |
+  |---|---|---|
+  | `roq tables [模式]` | `SHOW TABLES` | `SELECT ... FROM user_tables`（仅当前 schema；模式忽略大小写匹配） |
+  | `roq columns <表> [列模式]` | `SHOW FULL COLUMNS` | `user_tab_columns` + `user_col_comments`；`属主.表` 拒绝——视图仅覆盖当前 schema |
+  | `roq schema <表|库.表>` | `SHOW CREATE TABLE` | `DBMS_METADATA.GET_DDL`（两段名首段映射属主参数）；免单格截断 |
+  | `roq explain "SQL"` | `EXPLAIN ...` | **拒绝**——`EXPLAIN PLAN` 会真实写入 `PLAN_TABLE` |
+
+- `roq diff` **拒绝跨引擎比对**（mysql 与 oracle 的 profile 互比直接报错——闸门语义与类型口径
+  不同，比对出的数字只会误导）。
+- 审计行记录 profile 的 `engine` 字段；`roq log` 照常展示，该字段出现之前的历史行也兼容。
 
 ## 安全模型：三层只读保障
 
@@ -191,7 +227,8 @@ ssl=true             ; 可选：TLS 加密（不校验证书）
      `LOAD_FILE`、`SLEEP` 等），词边界匹配——`update_time` 等列名不误伤。
 2. **服务端会话只读**——连接后强制 `SET SESSION TRANSACTION READ ONLY` 并**回读断言**
    （`@@session.transaction_read_only` 必须为 `1`；SET 失败、回读失败、值非 1 一律中止查询），
-   并设 30 秒 `max_execution_time` 慢查询保险丝。
+   并设 30 秒 `max_execution_time` 慢查询保险丝。Oracle profile 走等价的
+   `SET TRANSACTION READ ONLY`——见 [Oracle 支持](#oracle-支持)。
 3. **输出限额**——行数与单格上限防大结果刷屏；格内转义保真且维持 TSV 单行结构。
 
 ## 审计日志与结果存档
@@ -199,7 +236,8 @@ ssl=true             ; 可选：TLS 加密（不校验证书）
 自动执行、**不可关闭**——这是只读工具的底账。
 
 - **审计日志**：`~/.roq/logs/roq-YYYYMM.jsonl`，每次调用一行 JSON：
-  `ts / profile / db / sql / rows / truncated / ms / outcome / reason / result`。`outcome` 含
+  `ts / profile / engine / db / sql / rows / truncated / ms / outcome / reason / result`。
+  `outcome` 含
   `ok`、`gate-rejected`（含拒绝原因）、`connect-error`、`exec-error`、`config-error`——被拒的
   尝试同样留痕。用 `roq log` 查询（默认今天；`--month` / `--last N` 扩大范围）。
 - **结果存档**：当前项目目录 `.roq/results/YYYYMMDD/HHMMSS-毫秒-<表名>-<profile>.tsv`（非项目
@@ -208,7 +246,7 @@ ssl=true             ; 可选：TLS 加密（不校验证书）
 
 ## 路线图
 
-- [ ] 多数据库驱动：PostgreSQL / SQLite（profile 增加 `driver=` 字段，闸门按方言适配）
+- [ ] 多数据库驱动：PostgreSQL / SQLite（在既有 `engine=` 字段与按方言分流的闸门上扩展）
 - [ ] 免配置直连：`--dsn "mysql://user:pass@host/db"` 一次性连接
 
 版本历史：见 [CHANGELOG.md](CHANGELOG.md)（英文）。
