@@ -209,7 +209,7 @@ roq tables --profile myproj-oracle
   |---|---|---|
   | `roq tables [模式]` | `SHOW TABLES` | `SELECT ... FROM user_tables`（仅当前 schema；模式忽略大小写匹配） |
   | `roq columns <表> [列模式]` | `SHOW FULL COLUMNS` | `user_tab_columns` + `user_col_comments`；`属主.表` 拒绝——视图仅覆盖当前 schema |
-  | `roq schema <表|库.表>` | `SHOW CREATE TABLE` | `DBMS_METADATA.GET_DDL`（两段名首段映射属主参数）；免单格截断 |
+  | `roq schema <表\|库.表>` | `SHOW CREATE TABLE` | `DBMS_METADATA.GET_DDL`（两段名首段映射属主参数）；免单格截断 |
   | `roq explain "SQL"` | `EXPLAIN ...` | **拒绝**——`EXPLAIN PLAN` 会真实写入 `PLAN_TABLE` |
 
 - `roq diff` **拒绝跨引擎比对**（mysql 与 oracle 的 profile 互比直接报错——闸门语义与类型口径
