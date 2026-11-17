@@ -135,9 +135,9 @@ fn add_with_sources(
     }
     // 密码两形式互斥；--password 参数或交互录入的明文都带回供回读解密校验用
     let (secret_line, entry_plain) = build_secret_line(password, password_env)?;
-    // 仅 oracle 落引擎行：缺省即 mysql，文件里不写冗余行
+    // 仅 oracle 落引擎行：前导换行使其紧跟 database 行独立成行（缺省即 mysql 不写冗余行）
     let engine_line = if engine == Engine::Oracle {
-        "engine=oracle\n"
+        "\nengine=oracle"
     } else {
         ""
     };
@@ -1076,17 +1076,28 @@ mod tests {
     fn add_writes_engine_line_for_oracle_and_refuses_ssl() {
         let path = temp_conf("eng-add");
         let _ = fs::remove_file(&path);
-        let msg = add_with_sources("demo", "h", 1521, "u", Some("p"), None, "FREEPDB1", false,
+        // 密码走 password_env（引擎无关、全平台可跑）：--password 的 DPAPI 路径仅 Windows 可用
+        let msg = add_with_sources("demo", "h", 1521, "u", None, Some("PWD_ENV"), "FREEPDB1", false,
             Some(path.clone()), false, Engine::Oracle, &[]).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("engine=oracle"), "应写入 engine 行：{}", text);
+        assert!(
+            text.contains("database=FREEPDB1\nengine=oracle\n"),
+            "database 行后应紧跟独立 engine 行：{}",
+            text
+        );
+        // 回读语义校验：database 值不得被引擎行污染
+        let profiles = load_profiles(&path).unwrap();
+        assert_eq!(
+            profiles["demo"].database, "FREEPDB1",
+            "database 值不得被引擎行污染"
+        );
         assert!(msg.contains("oracle"), "成功提示应含引擎：{}", msg);
         // mysql 显式 engine 不写行（缺省即 mysql）
         let path2 = temp_conf("eng-add-m");
-        add_with_sources("m", "h", 3306, "u", Some("p"), None, "d", false,
+        add_with_sources("m", "h", 3306, "u", None, Some("PWD_ENV"), "d", false,
             Some(path2.clone()), false, Engine::Mysql, &[]).unwrap();
         assert!(!fs::read_to_string(&path2).unwrap().contains("engine="));
-        // oracle + ssl 拒绝
+        // oracle + ssl 拒绝（双保险先于密码路径，全平台可跑）
         let err = add_with_sources("s", "h", 1521, "u", Some("p"), None, "d", true,
             Some(temp_conf("eng-add-s")), false, Engine::Oracle, &[]).unwrap_err();
         assert!(err.contains("ssl"), "应拒绝 oracle+ssl：{}", err);
