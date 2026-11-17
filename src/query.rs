@@ -46,6 +46,7 @@ pub fn execute(cli: &Cli, profile: &Profile, sql: &str) -> ExitCode {
         };
         append_audit_log(&audit_line(
             &cli.profile,
+            profile.engine.as_str(),
             &profile.database,
             sql,
             rows,

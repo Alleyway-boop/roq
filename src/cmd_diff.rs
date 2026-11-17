@@ -66,7 +66,8 @@ pub fn run(args: DiffArgs) -> ExitCode {
             let reason = format!("profile-missing: {}", missing);
             eprintln!("[roq diff] 配置 [{}] 不存在。--list 查看全部。", missing);
             append_audit_log(&audit_line(
-                &left_name, "", &raw_sql, 0, false, 0, "config-error", &reason, "",
+                // 任一侧 profile 缺失即走此路径，引擎无从得知，记空串（与 db 空串同一约定）
+                &left_name, "", "", &raw_sql, 0, false, 0, "config-error", &reason, "",
             ));
             return ExitCode::from(1);
         }
@@ -78,6 +79,7 @@ pub fn run(args: DiffArgs) -> ExitCode {
             eprintln!("[roq 闸门拒绝] {}", reason);
             append_audit_log(&audit_line(
                 &left_name,
+                left_profile.engine.as_str(),
                 &left_profile.database,
                 &raw_sql,
                 0,
@@ -97,6 +99,7 @@ pub fn run(args: DiffArgs) -> ExitCode {
             Ok(side) => {
                 append_audit_log(&audit_line(
                     name,
+                    profile.engine.as_str(),
                     &side.database,
                     &sql,
                     side.rows.len(),
@@ -112,6 +115,7 @@ pub fn run(args: DiffArgs) -> ExitCode {
                 eprintln!("[roq diff] {} 侧执行失败：{}", name, reason);
                 append_audit_log(&audit_line(
                     name,
+                    profile.engine.as_str(),
                     &profile.database,
                     &sql,
                     0,

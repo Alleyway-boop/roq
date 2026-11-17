@@ -33,8 +33,11 @@ pub fn json_escape(raw: &str) -> String {
 }
 
 /// 组装一条审计日志（JSONL 一行）。extra 形如 `,"reason":"..."`，可为空。
+/// engine 为 profile 的引擎规范名（"mysql"/"oracle"），紧随 profile 记录；
+/// profile 未命中（配置错误）时引擎无从得知，记空串——与该路径 db 为空串同一约定。
 pub fn audit_line(
     profile: &str,
+    engine: &str,
     db: &str,
     sql: &str,
     rows: usize,
@@ -45,9 +48,10 @@ pub fn audit_line(
     result_file: &str,
 ) -> String {
     format!(
-        "{{\"ts\":\"{}\",\"profile\":\"{}\",\"db\":\"{}\",\"sql\":\"{}\",\"rows\":{},\"truncated\":{},\"ms\":{},\"outcome\":\"{}\"{},\"result\":\"{}\"}}",
+        "{{\"ts\":\"{}\",\"profile\":\"{}\",\"engine\":\"{}\",\"db\":\"{}\",\"sql\":\"{}\",\"rows\":{},\"truncated\":{},\"ms\":{},\"outcome\":\"{}\"{},\"result\":\"{}\"}}",
         now_local(),
         json_escape(profile),
+        json_escape(engine),
         json_escape(db),
         json_escape(sql),
         rows,
@@ -131,7 +135,7 @@ pub fn save_result(
 
 #[cfg(test)]
 mod tests {
-    use super::json_escape;
+    use super::{audit_line, json_escape};
 
     #[test]
     fn json_escape_covers_controls_and_quotes() {
@@ -139,5 +143,11 @@ mod tests {
         assert_eq!(json_escape("\n\t\r"), "\\n\\t\\r");
         assert_eq!(json_escape("\u{1}"), "\\u0001");
         assert_eq!(json_escape("中文保持原样"), "中文保持原样");
+    }
+
+    #[test]
+    fn audit_line_carries_engine_after_profile() {
+        let line = audit_line("dev", "oracle", "db", "", 1, false, 5, "ok", "", "");
+        assert!(line.contains("\"profile\":\"dev\",\"engine\":\"oracle\""), "engine 紧随 profile：{}", line);
     }
 }

@@ -59,6 +59,8 @@ fn run_query(cli: Cli) -> ExitCode {
         eprintln!("配置 [{}] 不存在。--list 查看全部。", cli.profile);
         append_audit_log(&audit_line(
             &cli.profile,
+            // profile 不存在，引擎无从得知，记空串（与 db 空串同一约定）
+            "",
             "",
             cli.sql.as_deref().unwrap_or(""),
             0,
@@ -79,7 +81,7 @@ fn run_query(cli: Cli) -> ExitCode {
                 Ok(sql) => sql,
                 Err(msg) => {
                     eprintln!("[roq] {}", msg);
-                    append_audit_log(&audit_line(&cli.profile, "", "", 0, false, 0,
+                    append_audit_log(&audit_line(&cli.profile, profile.engine.as_str(), "", "", 0, false, 0,
                         "config-error", &format!(",\"reason\":\"{}\"", json_escape(&msg)), ""));
                     return ExitCode::from(EXIT_USAGE);
                 }
@@ -93,6 +95,7 @@ fn run_query(cli: Cli) -> ExitCode {
             eprintln!("[roq 闸门拒绝] {}", reason);
             append_audit_log(&audit_line(
                 &cli.profile,
+                profile.engine.as_str(),
                 &profile.database,
                 &sql,
                 0,

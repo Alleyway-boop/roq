@@ -91,11 +91,16 @@ pub fn collect_tail_lines(files: &[std::path::PathBuf], n: usize) -> Vec<String>
     collected
 }
 
-/// 人类可读的一行摘要：时分秒 profile db outcome 行数 耗时 SQL(截 60 字符)。
+/// 人类可读的一行摘要：时分秒 profile engine db outcome 行数 耗时 SQL(截 60 字符)。
+/// 历史 audit 行没有 engine 字段，按 mysql 展示（engine 字段引入前的行均为 MySQL）。
 pub fn format_line(value: &serde_json::Value) -> String {
     let ts = value.get("ts").and_then(|v| v.as_str()).unwrap_or("");
     let time = ts.get(11..19).unwrap_or(ts);
     let profile = value.get("profile").and_then(|v| v.as_str()).unwrap_or("?");
+    let engine = value
+        .get("engine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mysql");
     let db = value.get("db").and_then(|v| v.as_str()).unwrap_or("?");
     let outcome = value.get("outcome").and_then(|v| v.as_str()).unwrap_or("?");
     let rows = value.get("rows").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -103,8 +108,8 @@ pub fn format_line(value: &serde_json::Value) -> String {
     let sql = value.get("sql").and_then(|v| v.as_str()).unwrap_or("");
     let sql_short: String = sql.chars().take(60).collect();
     format!(
-        "{:<8} {:<10} {:<14} {:<13} {:>4}行 {:>6}ms  {}",
-        time, profile, db, outcome, rows, ms, sql_short
+        "{:<8} {:<10} {:<7} {:<14} {:<13} {:>4}行 {:>6}ms  {}",
+        time, profile, engine, db, outcome, rows, ms, sql_short
     )
 }
 
@@ -175,6 +180,9 @@ mod tests {
         "{\"ts\":\"2026-10-07T14:32:01.123+08:00\",\"profile\":\"dev\",\"db\":\"mydb\",\"sql\":\"SELECT 1\",\"rows\":3,\"truncated\":false,\"ms\":45,\"outcome\":\"ok\",\"result\":\"x.tsv\"}";
     const LINE_PROD_REJECTED: &str =
         "{\"ts\":\"2026-10-06T09:00:00.000+08:00\",\"profile\":\"prod\",\"db\":\"pdb\",\"sql\":\"DELETE FROM t\",\"rows\":0,\"truncated\":false,\"ms\":1,\"outcome\":\"gate-rejected\",\"reason\":\"\",\"result\":\"\"}";
+    // 新版审计行样本：engine 字段紧随 profile（历史行没有该字段）
+    const LINE_DEV_OK_ORACLE: &str =
+        "{\"ts\":\"2026-10-07T14:32:05.456+08:00\",\"profile\":\"dev\",\"engine\":\"oracle\",\"db\":\"orcl\",\"sql\":\"SELECT 1 FROM DUAL\",\"rows\":1,\"truncated\":false,\"ms\":7,\"outcome\":\"ok\",\"result\":\"y.tsv\"}";
     // 注入陷阱：SQL 文本里含 "profile":"dev" 字样,但实际 profile 是 prod
     const LINE_SMIUGGLED: &str =
         "{\"ts\":\"2026-10-07T15:00:00.000+08:00\",\"profile\":\"prod\",\"db\":\"pdb\",\"sql\":\"SELECT '{\\\"profile\\\":\\\"dev\\\"}' AS s\",\"rows\":1,\"truncated\":false,\"ms\":5,\"outcome\":\"ok\",\"result\":\"\"}";
@@ -236,6 +244,22 @@ mod tests {
         assert!(text.contains("dev"));
         assert!(text.contains("ok"));
         assert!(text.contains("SELECT 1"));
+    }
+
+    #[test]
+    fn format_line_defaults_missing_engine_to_mysql() {
+        // 旧审计行（无 engine 字段）按 mysql 展示，不破历史可读性
+        let value: serde_json::Value =
+            serde_json::from_str(LINE_DEV_OK).unwrap();
+        let text = format_line(&value);
+        assert!(text.contains("mysql"), "缺 engine 的旧行应显示 mysql：{}", text);
+    }
+
+    #[test]
+    fn format_line_shows_engine_when_present() {
+        let value: serde_json::Value = serde_json::from_str(LINE_DEV_OK_ORACLE).unwrap();
+        let text = format_line(&value);
+        assert!(text.contains("oracle"), "含 engine 的新行应显示 oracle：{}", text);
     }
 
     #[test]
